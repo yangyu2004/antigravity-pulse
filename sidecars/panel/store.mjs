@@ -157,5 +157,86 @@ export class MetricsStore {
       source: 'Antigravity local API',
     };
   }
+
+  async cascadeRunState(conversationId, { force = false } = {}) {
+    if (!this.owned() || !conversationId || !GUID.test(conversationId)) return null;
+    const id = conversationId.toLowerCase();
+    const reader = this.client?.reader;
+    if (!reader) return null;
+    const isRunning = s => Boolean(s && !/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s)));
+    const isSettled = s => Boolean(s && /IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s)));
+    try {
+      const now = typeof this.client?.now === 'function' ? this.client.now() : Date.now();
+      const age = Number.isFinite(reader.summaryAt) ? now - reader.summaryAt : Infinity;
+      const prevActive = this._activeCascades?.has(id) === true;
+      if (typeof reader.summary === 'function' && (force || !reader.summaries || age >= (prevActive ? 900 : 1500))) {
+        await reader.summary(id, null, true).catch(() => null);
+      }
+    } catch {}
+    const summaries = reader.summaries;
+    if (!summaries || typeof summaries !== 'object') return null;
+
+    const normalized = new Map();
+    for (const [rawKey, val] of Object.entries(summaries)) {
+      if (val && typeof val === 'object') normalized.set(String(rawKey).toLowerCase(), val);
+    }
+
+    const knownDelegated = this.sessions.get(id)?.data?.delegatedConversations || [];
+    const descendants = new Set(
+      knownDelegated.map(x => String(x || '').toLowerCase()).filter(x => GUID.test(x) && x !== id)
+    );
+    let expanded = true;
+    while (expanded && descendants.size < 256) {
+      expanded = false;
+      for (const [cid, cs] of normalized) {
+        if (cid === id || descendants.has(cid)) continue;
+        const pId = String(cs?.trajectoryMetadata?.parentConversationId || '').toLowerCase();
+        const rId = String(cs?.trajectoryMetadata?.rootConversationId || '').toLowerCase();
+        if (pId === id || rId === id || (pId && descendants.has(pId)) || (rId && descendants.has(rId))) {
+          descendants.add(cid);
+          expanded = true;
+          if (descendants.size >= 256) break;
+        }
+      }
+    }
+
+    const runningSubagentIds = [];
+    let latestSubagentModifiedMs = 0;
+    let latestRunningSubagentModifiedMs = 0;
+    for (const cid of descendants) {
+      const cs = normalized.get(cid);
+      if (!cs) continue;
+      const modMs = Date.parse(cs.lastModifiedTime || '') || 0;
+      if (modMs > latestSubagentModifiedMs) latestSubagentModifiedMs = modMs;
+      const childActive = isRunning(cs.status) || cs.hasActiveChildren === true || cs.hasRunningSubagents === true || cs.notFullyIdle === true;
+      if (childActive) {
+        runningSubagentIds.push(cid);
+        if (modMs > latestRunningSubagentModifiedMs) latestRunningSubagentModifiedMs = modMs;
+      }
+    }
+
+    const selfSummary = normalized.get(id) || null;
+    const selfHasActiveChildren = Boolean(selfSummary && (selfSummary.hasActiveChildren === true || selfSummary.hasRunningSubagents === true));
+    const selfRunning = Boolean(selfSummary && (isRunning(selfSummary.status) || selfSummary.notFullyIdle === true));
+    const selfSettled = Boolean(selfSummary && isSettled(selfSummary.status) && !selfHasActiveChildren && runningSubagentIds.length === 0);
+    const selfModifiedMs = Date.parse(selfSummary?.lastModifiedTime || '') || 0;
+
+    this._activeCascades ||= new Set();
+    if (selfRunning || selfHasActiveChildren || runningSubagentIds.length > 0) this._activeCascades.add(id);
+    else this._activeCascades.delete(id);
+
+    return {
+      selfStatus: selfSummary?.status || null,
+      selfRunning,
+      selfSettled,
+      selfHasActiveChildren,
+      selfModifiedMs,
+      totalSubagents: descendants.size,
+      runningSubagents: runningSubagentIds.length,
+      runningSubagentIds,
+      latestSubagentModifiedMs,
+      latestRunningSubagentModifiedMs,
+    };
+  }
   dispose(){this.disposed=true;this.delegated.dispose();this.transcripts?.reset();this.epoch++;}
 }

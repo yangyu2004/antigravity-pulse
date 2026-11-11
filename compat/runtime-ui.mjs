@@ -25,6 +25,9 @@ export function validatedInput(value) {
   if (value.conversationId != null && !GUID.test(value.conversationId)) throw new Error('Invalid conversation ID');
   const result = { conversationId: value.conversationId || null, force: value.force === true };
   if (typeof value.hostGenerating === 'boolean') result.hostGenerating = value.hostGenerating;
+  if (Number.isSafeInteger(value.domRunningSubagents) && value.domRunningSubagents > 0 && value.domRunningSubagents <= 128) {
+    result.domRunningSubagents = value.domRunningSubagents;
+  }
   // Historical usage import is an explicit, user-visible action. It must not
   // be started by the high-frequency inline metrics poll.
   if (value.usageSync === true) result.usageSync = true;

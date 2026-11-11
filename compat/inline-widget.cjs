@@ -19,7 +19,7 @@ module.exports = function installAgPulseInlineWidget() {
   // /c/<id> URL, and must never inherit the desktop's conversation fallback.
   const surface=window.__agPulseSurface;
   const setMarkup=(element,markup)=>{if(surface?.setMarkup)surface.setMarkup(element,markup);else element.innerHTML=markup;};
-  let node=null,root=null,data=null,pending=false,cardName=null,hoverTimer=null,openTimer=null,warmUntil=0,lastConversation=null,lastFetch=0,lastExpiredRefresh=0,resizeObserver=null,groupMenu=null,themeController=null,changingCards=false;
+  let node=null,root=null,data=null,pending=false,cardName=null,hoverTimer=null,openTimer=null,warmUntil=0,lastConversation=null,conversationSwitchedAt=0,lastHostGenerating=null,lastDomSubagents=0,lastFetch=0,lastExpiredRefresh=0,resizeObserver=null,groupMenu=null,themeController=null,changingCards=false;
   const HOVER_DELAY=250,WARM_WINDOW=350,LEAVE_DELAY=120;
   const isWarm=()=>Boolean(cardName||Date.now()<warmUntil);
   let chosen=localGet('ag-pulse-group'),group=null;
@@ -111,16 +111,29 @@ module.exports = function installAgPulseInlineWidget() {
   function clearInlineChatCards(){
     for(const el of document.querySelectorAll('.ag-pulse-inline-chat-host'))el.remove();
   }
+  function resetTaskProgressDom(){
+    if(!root)return;
+    const list=$('tp-steps-list');
+    if(list){list.dataset.sig='';setMarkup(list,'');}
+    const fill=$('tp-ring-fill'),trackFill=$('tp-track-fill');
+    if(fill){style(fill,'transition','none');style(fill,'stroke-dashoffset','113.1');style(fill,'stroke','var(--pulse-accent)');}
+    if(trackFill){style(trackFill,'transition','none');style(trackFill,'width','0%');style(trackFill,'background','');}
+    requestAnimationFrame(()=>{
+      if(fill)style(fill,'transition','');
+      if(trackFill)style(trackFill,'transition','');
+    });
+  }
   function syncConversation(){
     const id=conversationId();
     if(id===lastConversation)return false;
-    lastConversation=id;requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
+    lastConversation=id;conversationSwitchedAt=Date.now();lastHostGenerating=null;lastDomSubagents=0;
+    requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
     stopDensityMotion();densityFrame=null;densityProbe=null;
-    manualRequest=null;refreshBusy(false);clearInlineChatCards();
+    manualRequest=null;refreshBusy(false);clearInlineChatCards();resetTaskProgressDom();
     data={connection:'offline',groups:[],speed:null};group=null;hide();
     // Navigation has its own refresh budget. A request from the old composer
     // must neither block the new route nor reset its polling clock on arrival.
-    queueMicrotask(()=>{if(!disposed)refresh();});return true;
+    queueMicrotask(()=>{if(!disposed)refresh(true);});return true;
   }
   function localize(){
     attribute(node,'lang',language.language);
@@ -375,6 +388,10 @@ module.exports = function installAgPulseInlineWidget() {
     if(cardName!==name)closeGroup();
     clearTimeout(hoverTimer);hoverTimer=null;
     clearTimeout(openTimer);openTimer=null;
+    if(name==='task-progress'){
+      syncOptimisticRunningState();
+      if(Date.now()-lastFetch>250)void refresh(true);
+    }
     cardName=name;warmUntil=0;
     for(const e of root.querySelectorAll('[data-card]'))e.setAttribute('aria-expanded',String(e.dataset.card===name));
     changingCards=true;
@@ -790,12 +807,88 @@ module.exports = function installAgPulseInlineWidget() {
     render();refresh();
   }
   const escHtml=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  function isHostGenerating(){
-    const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]');
+  const CANCEL_LABEL_RE=/^(?:cancel|stop|取消|停止)(?:\b|\s|生成|任务|响应|$)/i;
+  function findCancelButton(box){
+    if(!box)return null;
+    const owned=e=>{const b=e.closest('[data-testid="agent-input-box"]')||e.closest('[id="antigravity.agentSidePanelInputBox"]');return !b||b===box;};
+    const candidates=box.querySelectorAll('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"],[data-tooltip-id*="stop"],[data-tooltip-id*="cancel"],button[aria-label]');
+    for(const btn of candidates){
+      if(!owned(btn)||btn.disabled||!visibleHostElement(btn))continue;
+      const tid=btn.getAttribute('data-testid')||'';
+      const tip=btn.getAttribute('data-tooltip-id')||'';
+      const aria=btn.getAttribute('aria-label')||'';
+      if(/^(?:input-cancel|stop|cancel)-button$/i.test(tid)||/(?:stop|cancel)-button/i.test(tip)||CANCEL_LABEL_RE.test(aria))return btn;
+    }
+    return null;
+  }
+  function extractElementDirectText(el){
+    let out='';
+    for(const child of el.childNodes){
+      if(child.nodeType===3)out+=' '+child.nodeValue;
+      else if(child.nodeType===1&&child.localName!=='svg'&&child.localName!=='style'&&child.localName!=='script')out+=' '+(child.textContent||'');
+    }
+    return out.replace(/\s+/g,' ').trim();
+  }
+  function countDomRunningSubagents(){
+    if(composer?.kind==='subagent')return 0;
+    const convScope=composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||document.querySelector('[data-testid="conversation-view"]');
+    if(!convScope)return 0;
+    const checkSet=[];
+    const responses=convScope.querySelectorAll('[data-testid="agent-response"]');
+    for(let i=Math.max(0,responses.length-2);i<responses.length;i++){
+      const all=responses[i].querySelectorAll('span,div,button');
+      for(let j=Math.max(0,all.length-50);j<all.length;j++)checkSet.push(all[j]);
+    }
+    for(const child of convScope.children){
+      if(child===composer?.box||child.contains?.(composer?.box)||child.matches?.('[data-testid="subagent-tab-conversation"]'))continue;
+      if(!child.querySelector?.('[data-testid="agent-response"]')){
+        const els=child.querySelectorAll?.('span,div,button')||[];
+        for(let k=0;k<Math.min(els.length,40);k++)checkSet.push(els[k]);
+      }
+    }
+    let maxCount=0;
+    for(const el of checkSet){
+      if(!el?.isConnected||el.childElementCount>3||el.closest('pre,code,[contenteditable="true"],[hidden],[inert],[data-testid="subagent-tab-conversation"],#ag-pulse-status-bar,.ag-pulse-inline-chat-host'))continue;
+      const raw=extractElementDirectText(el);
+      if(!raw||raw.length>48)continue;
+      const mEn=raw.match(/^(\d+)\s+subagents?\s+running$/i);
+      const mZh=raw.match(/^(\d+)\s*个?(?:子代理|子智能体|代理)(?:正在)?(?:运行|执行)中?$/);
+      if(mEn||mZh){
+        if(visibleHostElement(el))maxCount=Math.max(maxCount,Number((mEn||mZh)[1])||1);
+      }else if(/^(?:subagent\s+running|子代理正在运行|子智能体运行中)$/i.test(raw)&&visibleHostElement(el)){
+        maxCount=Math.max(maxCount,1);
+      }
+    }
+    return maxCount;
+  }
+  function isHostGenerating(domSubagents=countDomRunningSubagents()){
+    const box=composer?.box;
     if(!box||!visibleHostElement(box))return null;
-    const cancelBtn=box.querySelector('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"]');
-    if(cancelBtn&&!cancelBtn.disabled&&visibleHostElement(cancelBtn))return true;
+    if(findCancelButton(box))return true;
+    if(domSubagents>0)return true;
+    if(Date.now()-conversationSwitchedAt<2500)return null;
     return box.querySelector('[contenteditable="true"]')?false:null;
+  }
+  function syncOptimisticRunningState(){
+    const domSub=countDomRunningSubagents();
+    const gen=isHostGenerating(domSub);
+    if(gen===true&&data?.taskProgress&&(data.taskProgress.status==='completed'||data.taskProgress.status==='idle')){
+      const headline=domSub>0?`🔄 ${domSub} 个子代理运行中`:'🤔 思考规划中 (0s)';
+      data.taskProgress={
+        ...data.taskProgress,
+        status:'running',
+        progressPercent:domSub>0?Math.min(90,Math.max(25,data.taskProgress.progressPercent||50)):15,
+        headline,
+        isStalled:false,
+        stalledDuration:0,
+        steps:[
+          {id:1,title:'接收指令与上下文准备',status:'completed',percent:100},
+          {id:2,title:domSub>0?`等待 ${domSub} 个子代理完成协同任务`:'思考规划执行方案',status:'running',percent:50},
+          {id:3,title:'整理结果并完成交付',status:'pending',percent:0},
+        ],
+      };
+      renderTaskProgress(data.taskProgress);
+    }
   }
   let reinvoking=false;
   async function reinvokeHost(){
@@ -803,8 +896,8 @@ module.exports = function installAgPulseInlineWidget() {
     reinvoking=true;
     try{
       const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]');
-      const cancelBtn=box?.querySelector('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"]');
-      if(cancelBtn&&!cancelBtn.disabled&&visibleHostElement(cancelBtn)){
+      const cancelBtn=findCancelButton(box);
+      if(cancelBtn){
         cancelBtn.click();
         await new Promise(r=>setTimeout(r,450));
       }
@@ -960,7 +1053,7 @@ module.exports = function installAgPulseInlineWidget() {
         text('task-percent-badge',badgeStr);
         hidden(badge,!badgeStr);
       }
-      const cleanHead=tp.headline?tp.headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹)\s*/u,'').replace(/^\[\d+\/\d+\]\s*/,''):'';
+      const cleanHead=tp.headline?tp.headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹|🔄)\s*/u,'').replace(/^\[\d+\/\d+\]\s*/,''):'';
       text('task-title-snippet',isStalled?t('taskStalled'):(cleanHead||t('taskProgress')));
     }
     text('tp-gauge-percent',`${percent}%`);
@@ -1179,9 +1272,11 @@ module.exports = function installAgPulseInlineWidget() {
     const epoch=requestEpoch;
     const current=()=>!disposed&&epoch===requestEpoch&&conversation===conversationId()&&conversation===lastConversation&&node?.isConnected;
     pending=true;lastFetch=Date.now();
-    const hostGenerating=isHostGenerating();
+    const domRunningSubagents=countDomRunningSubagents();
+    const hostGenerating=isHostGenerating(domRunningSubagents);
+    lastHostGenerating=hostGenerating;lastDomSubagents=domRunningSubagents;
     refreshRequest=(async()=>{
-      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(syncUsage?{usageSync:true}:{})});if(!current())return;node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
+      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(domRunningSubagents>0?{domRunningSubagents}:{}),...(syncUsage?{usageSync:true}:{})});if(!current())return;node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
       catch{if(current()&&data){data.connection='stale';data.error=t('reconnecting');render();}}
       finally{if(epoch===requestEpoch){pending=false;refreshRequest=null;}}
     })();
@@ -1193,7 +1288,13 @@ module.exports = function installAgPulseInlineWidget() {
   document.addEventListener('keydown',onKey);document.addEventListener('pointerdown',onPointer);document.addEventListener('focusin',onFocus);
   window.addEventListener('resize',scheduleLayout);document.addEventListener('scroll',scheduleLayout,true);
   densityMedia.addEventListener('change',stopDensityMotion);
-  const timerId=setInterval(()=>{mount();fit();tick();position();if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:800))refresh();},600);
+  const timerId=setInterval(()=>{
+    mount();fit();tick();position();
+    const curSub=countDomRunningSubagents(),curGen=isHostGenerating(curSub);
+    const stateFlipped=(curGen!==lastHostGenerating&&curGen!==null)||curSub!==lastDomSubagents;
+    if(stateFlipped){syncOptimisticRunningState();refresh(true);return;}
+    if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:800))refresh();
+  },600);
   window.__agPulseDispose=()=>{
     disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;
     clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hide();usageDashboard?.dispose();updateMenu?.dispose();clearInlineChatCards();node?.remove();

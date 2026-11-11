@@ -14,7 +14,7 @@ export class TaskMonitor {
     this.transcriptCache = new Map();
   }
 
-  async snapshot(conversationId, { hostGenerating = null } = {}) {
+  async snapshot(conversationId, { hostGenerating = null, domRunningSubagents = 0, cascadeState = null } = {}) {
     if (!conversationId || !GUID.test(conversationId)) {
       return this.defaultSnapshot('idle', '等待对话启动');
     }
@@ -45,11 +45,32 @@ export class TaskMonitor {
     // 2. 增量读取 transcript.jsonl
     const tState = await this.readTranscriptIncremental(id, transcriptPath, now);
 
-    // 3. 读取可选的 scratch/task_steps.json（模型显式写入的精确步骤）
+    // 检测“新一轮刚触发 PreInvocation，但 transcript.jsonl 尚未刷入新 USER_INPUT”的瞬态窗口，防止把上一轮已完成的看板闪出来
+    const hookInputGoal = this.extractUserRequest(lifecycle?.lastUserInput || '');
+    const pendingNewUserTurn = Boolean(
+      tState.lastStepFinished &&
+      tState.turnEndMs > 0 &&
+      lifecycleEvent === 'PreInvocation' &&
+      lifecycleMs > tState.turnEndMs + 150 &&
+      ((hookInputGoal && hookInputGoal !== tState.lastUserInputGoal) ||
+       (lifecycle?.invocationNum === 0 && lifecycleMs > (tState.turnStartMs || 0) + 1500))
+    );
+    const effectiveTurnStartMs = pendingNewUserTurn ? lifecycleMs : tState.turnStartMs;
+    const effectivePrevTurnEndMs = pendingNewUserTurn
+      ? Math.max(tState.turnEndMs || 0, tState.prevTurnEndMs || 0)
+      : (tState.prevTurnEndMs || 0);
+    const activeTranscriptSteps = pendingNewUserTurn ? [] : tState.steps;
+    const activeTurnToolSteps = pendingNewUserTurn ? [] : tState.turnToolSteps;
+
+    // 3. 读取可选的 scratch/task_steps.json（模型显式写入的精确步骤；严格隔离上一轮已完成旧文件）
     let filePlan = null;
     try {
       const st = await stat(agentStepsPath);
-      if (!tState.turnStartMs || st.mtimeMs >= tState.turnStartMs - 2000) {
+      const minValidMtime = effectiveTurnStartMs > 0
+        ? effectiveTurnStartMs - 250
+        : (tState.firstSeenStepMs > 0 ? tState.firstSeenStepMs - 2000 : 0);
+      const fromPreviousTurn = effectivePrevTurnEndMs > 0 && st.mtimeMs <= effectivePrevTurnEndMs + 500;
+      if (!fromPreviousTurn && (!minValidMtime || st.mtimeMs >= minValidMtime)) {
         const parsed = JSON.parse(await readFile(agentStepsPath, 'utf8'));
         if (Array.isArray(parsed?.steps) && parsed.steps.length >= 2) {
           filePlan = parsed;
@@ -57,18 +78,60 @@ export class TaskMonitor {
       }
     } catch {}
 
-    // 4. 融合宿主真实生成状态（hostGenerating===false 代表输入框无取消按钮，100% 处于待命/已完成态）
-    const hookStopped = lifecycleEvent === 'Stop' && lifecycle?.fullyIdle !== false;
-    const transcriptCompletedAfterHook = tState.lastStepFinished && tState.turnEndMs > 0 && tState.turnEndMs >= lifecycleMs - 1000;
-    const turnFinished = hostGenerating === false
-      ? true
-      : hostGenerating === true
-        ? false
-        : (hookStopped || transcriptCompletedAfterHook);
+    // 4. 融合语言服务权威轨迹状态 + 子代理（Subagent / Swarm）活跃状态 + 宿主输入框状态
+    const lsSubagentCount = Number.isSafeInteger(cascadeState?.runningSubagents) && cascadeState.runningSubagents > 0
+      ? cascadeState.runningSubagents
+      : 0;
+    const domSubagentCount = Number.isSafeInteger(domRunningSubagents) && domRunningSubagents > 0
+      ? domRunningSubagents
+      : 0;
+    const runningSubagentCount = Math.max(lsSubagentCount, domSubagentCount, cascadeState?.selfHasActiveChildren ? 1 : 0);
+    const hasRunningSubagents = runningSubagentCount > 0;
+    const subagentProbe = hasRunningSubagents
+      ? await this.probeSubagentsActivity(cascadeState?.runningSubagentIds || [])
+      : { latestMtimeMs: 0, latestAction: '' };
 
-    // 5. 仅扫描属于本轮对话（mtime >= turnStartMs）的后台任务日志，彻底屏蔽历史旧日志
+    const lsRunning = cascadeState?.selfRunning === true;
+    const lsSettled = cascadeState?.selfSettled === true;
+    const activeHookEvent = ['PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation'].includes(lifecycleEvent) ||
+      (lifecycleEvent === 'Stop' && lifecycle?.fullyIdle === false);
+    const transcriptCompletedAfterHook = !pendingNewUserTurn &&
+      tState.lastStepFinished &&
+      tState.turnEndMs > 0 &&
+      tState.turnEndMs >= lifecycleMs - 1000;
+    const abortedByError = !pendingNewUserTurn &&
+      tState.lastErrorMs > 0 &&
+      tState.lastErrorMs >= Math.max(effectiveTurnStartMs || 0, lifecycleMs - 1000) &&
+      !lsRunning &&
+      !hasRunningSubagents &&
+      hostGenerating !== true;
+    const staleIdleHook = activeHookEvent &&
+      !pendingNewUserTurn &&
+      !lsRunning &&
+      !hasRunningSubagents &&
+      hostGenerating === false && (
+        (lsSettled && (now - Math.max(lifecycleMs, tState.lastGrowthMs || 0)) > 2500) ||
+        (!cascadeState && tState.lastStepFinished && (now - Math.max(lifecycleMs, tState.lastGrowthMs || 0)) > 4000)
+      );
+    const unfinishedTranscriptActive = !pendingNewUserTurn &&
+      !tState.lastStepFinished &&
+      !lsSettled &&
+      !abortedByError &&
+      !(!cascadeState && hostGenerating === false && (now - (tState.lastGrowthMs || 0)) > 4000);
+
+    const inActiveTurn = Boolean(
+      hasRunningSubagents ||
+      lsRunning ||
+      hostGenerating === true ||
+      pendingNewUserTurn ||
+      (activeHookEvent && !transcriptCompletedAfterHook && !abortedByError && !staleIdleHook) ||
+      unfinishedTranscriptActive
+    );
+    const turnFinished = !inActiveTurn;
+
+    // 5. 仅扫描属于本轮对话（mtime >= effectiveTurnStartMs）的后台任务日志，彻底屏蔽历史旧日志
     let latestTask = null;
-    if (tState.turnStartMs > 0) {
+    if (effectiveTurnStartMs > 0) {
       try {
         const files = await readdir(tasksDir);
         const logFiles = files.filter(f => f.endsWith('.log'));
@@ -76,7 +139,7 @@ export class TaskMonitor {
         for (const file of logFiles) {
           const filePath = join(tasksDir, file);
           const st = await stat(filePath);
-          if (st.mtimeMs >= tState.turnStartMs - 1000 && st.mtimeMs > newestMtime) {
+          if (st.mtimeMs >= effectiveTurnStartMs - 1000 && st.mtimeMs > newestMtime) {
             newestMtime = st.mtimeMs;
             const tail = await this.readTailText(filePath, 2048);
             const lines = tail.trim().split('\n').filter(Boolean);
@@ -91,20 +154,20 @@ export class TaskMonitor {
       } catch {}
     }
 
-    // 6. 判定当前活跃动向与卡死状态
+    // 6. 判定当前活跃动向与卡死状态（合并运行中子代理的最新心跳，避免主会话等待子代理时误报卡死）
     const hasBgTaskRunning = !turnFinished && lifecycleEvent === 'Stop' && lifecycle?.fullyIdle === false;
-    const inActiveTurn = !turnFinished && (
-      hostGenerating === true ||
-      ['PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation'].includes(lifecycleEvent) ||
-      hasBgTaskRunning
-    );
-
+    const subagentActivityMs = hasRunningSubagents
+      ? Math.max(cascadeState?.latestRunningSubagentModifiedMs || 0, subagentProbe.latestMtimeMs || 0)
+      : 0;
     const lastActivityMs = Math.max(
       lifecycleMs,
       tState.lastGrowthMs || 0,
-      latestTask ? latestTask.mtimeMs : 0
+      latestTask ? latestTask.mtimeMs : 0,
+      lsRunning ? (cascadeState?.selfModifiedMs || 0) : 0,
+      subagentActivityMs
     );
     const silenceSec = lastActivityMs > 0 ? Math.max(0, Math.round((now - lastActivityMs) / 1000)) : 0;
+    const mainWaitingOnSubagents = hasRunningSubagents && (!lsRunning || lifecycleEvent === 'Stop' || tState.lastStepFinished);
 
     let status = 'idle';
     let isStalled = false;
@@ -112,43 +175,61 @@ export class TaskMonitor {
     let headline = '待命';
 
     if (inActiveTurn) {
-      const threshold = lifecycleEvent === 'PreToolUse' ? TOOL_STALL_SEC : THINK_STALL_SEC;
-      if (silenceSec >= threshold) {
+      const threshold = (lifecycleEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
+      const hasSubagentTelemetry = subagentActivityMs > 0 || (cascadeState?.runningSubagentIds?.length || 0) > 0;
+      const canMeasureStall = !mainWaitingOnSubagents || hasSubagentTelemetry;
+      if (canMeasureStall && silenceSec >= threshold) {
         isStalled = true;
         status = 'stalled';
-        stalledReason = lifecycleEvent === 'PreToolUse'
-          ? `工具 [${hookToolName || 'tool'}] 已连续 ${silenceSec} 秒无响应`
-          : hasBgTaskRunning
-            ? `后台任务 [${latestTask?.name || 'task'}] 已连续 ${silenceSec} 秒无输出`
-            : `模型思考已连续 ${silenceSec} 秒无新响应`;
-        headline = `⚠️ 疑似卡住 (${silenceSec}s)`;
+        stalledReason = mainWaitingOnSubagents
+          ? `运行中的 ${runningSubagentCount} 个子代理已连续 ${silenceSec} 秒无新响应`
+          : lifecycleEvent === 'PreToolUse'
+            ? `工具 [${hookToolName || 'tool'}] 已连续 ${silenceSec} 秒无响应`
+            : hasBgTaskRunning
+              ? `后台任务 [${latestTask?.name || 'task'}] 已连续 ${silenceSec} 秒无输出`
+              : `模型思考已连续 ${silenceSec} 秒无新响应`;
+        headline = mainWaitingOnSubagents ? `⚠️ 子代理疑似卡住 (${silenceSec}s)` : `⚠️ 疑似卡住 (${silenceSec}s)`;
+      } else if (mainWaitingOnSubagents) {
+        status = 'running';
+        headline = subagentProbe.latestAction
+          ? `🔄 ${runningSubagentCount} 个子代理运行中 · ${subagentProbe.latestAction}`
+          : `🔄 ${runningSubagentCount} 个子代理运行中`;
       } else if (lifecycleEvent === 'PreToolUse') {
         status = 'running';
         const act = this.formatToolAction(hookToolName, hookToolArgs);
-        headline = act ? `⚙️ ${act}` : `🤔 思考推进中 (${silenceSec}s)`;
+        const subSuffix = hasRunningSubagents ? ` · ${runningSubagentCount} 子代理` : '';
+        headline = act ? `⚙️ ${act}${subSuffix}` : `🤔 思考推进中 (${silenceSec}s)`;
       } else if (hasBgTaskRunning && latestTask) {
         status = 'running';
         headline = `⚙️ 后台任务: ${latestTask.name}`;
+      } else if (hasRunningSubagents) {
+        status = 'running';
+        headline = `🔄 ${runningSubagentCount} 个子代理协同推进中`;
       } else {
         status = 'running';
         headline = `🤔 思考规划中 (${silenceSec}s)`;
       }
-    } else if (turnFinished && (tState.steps.length > 0 || tState.turnToolSteps.length > 0 || filePlan || tState.turnStartMs > 0)) {
-      if (lifecycle?.terminationReason === 'ERROR' && lifecycleMs >= tState.turnStartMs) {
+    } else if (turnFinished && (activeTranscriptSteps.length > 0 || activeTurnToolSteps.length > 0 || filePlan || effectiveTurnStartMs > 0)) {
+      if ((lifecycle?.terminationReason === 'ERROR' && lifecycleMs >= (effectiveTurnStartMs || 0)) || abortedByError) {
         status = 'idle';
         headline = '⚠️ 上轮执行异常中断';
-      } else if (lifecycle?.terminationReason === 'USER_CANCELED' && lifecycleMs >= tState.turnStartMs) {
+      } else if (lifecycle?.terminationReason === 'USER_CANCELED' && lifecycleMs >= (effectiveTurnStartMs || 0)) {
         status = 'idle';
         headline = '⏹ 已手动中止';
       } else {
-        const hadMultiStep = Boolean(filePlan || tState.steps.length >= 2 || tState.turnToolSteps.length >= 2);
+        const hadMultiStep = Boolean(
+          filePlan ||
+          activeTranscriptSteps.length >= 2 ||
+          activeTurnToolSteps.length >= 2 ||
+          (cascadeState?.totalSubagents || 0) > 0
+        );
         status = hadMultiStep ? 'completed' : 'idle';
         headline = hadMultiStep ? '✓ 当前任务已完成' : '📋 待命';
       }
     }
 
     // 7. 组装步骤清单（优先级：用户手动点击 > scratch/task_steps.json > 模型计划列表 > 真实工具执行时间线）
-    const custom = this.customSteps.get(id);
+    const custom = pendingNewUserTurn ? null : this.customSteps.get(id);
     let baseSteps = [];
     let hasRealSteps = false;
 
@@ -164,15 +245,15 @@ export class TaskMonitor {
         explicit: true
       }));
       hasRealSteps = true;
-    } else if (tState.steps.length >= 2) {
+    } else if (activeTranscriptSteps.length >= 2) {
       hasRealSteps = true;
-      const allExplicit = tState.steps.every(s => s.explicit);
-      if (turnFinished && !['ERROR', 'USER_CANCELED'].includes(lifecycle?.terminationReason || '')) {
-        baseSteps = tState.steps.map(s => ({ ...s, status: 'completed', percent: 100 }));
+      const allExplicit = activeTranscriptSteps.every(s => s.explicit);
+      if (turnFinished && !['ERROR', 'USER_CANCELED'].includes(lifecycle?.terminationReason || '') && !abortedByError) {
+        baseSteps = activeTranscriptSteps.map(s => ({ ...s, status: 'completed', percent: 100 }));
       } else if (!allExplicit) {
-        const advanced = Math.min(tState.steps.length - 1, Math.max(0, Math.floor(tState.modelStepsAfterPlan / 2)));
+        const advanced = Math.min(activeTranscriptSteps.length - 1, Math.max(0, Math.floor(tState.modelStepsAfterPlan / 2)));
         let foundActive = false;
-        baseSteps = tState.steps.map((s, idx) => {
+        baseSteps = activeTranscriptSteps.map((s, idx) => {
           if (s.status === 'completed' || idx < advanced) {
             return { ...s, status: 'completed', percent: 100 };
           }
@@ -183,17 +264,22 @@ export class TaskMonitor {
           return { ...s, status: 'pending', percent: 0 };
         });
       } else {
-        baseSteps = tState.steps.map(s => ({ ...s }));
+        baseSteps = activeTranscriptSteps.map(s => ({ ...s }));
       }
-    } else if (tState.turnToolSteps.length > 0 || (inActiveTurn && lifecycleEvent === 'PreToolUse')) {
+    } else if (activeTurnToolSteps.length > 0 || (inActiveTurn && (lifecycleEvent === 'PreToolUse' || hasRunningSubagents))) {
       // 自动使用本轮真实调用过的工具生成 Claude 风格步骤轨
-      const toolItems = tState.turnToolSteps.slice(-6).map((title, idx) => ({
+      const toolItems = activeTurnToolSteps.slice(-6).map((title, idx) => ({
         id: idx + 1,
         title,
         status: 'completed',
         percent: 100
       }));
-      if (inActiveTurn && lifecycleEvent === 'PreToolUse') {
+      if (inActiveTurn && mainWaitingOnSubagents) {
+        const subTitle = subagentProbe.latestAction
+          ? `子代理协同中（${runningSubagentCount}）：${subagentProbe.latestAction}`
+          : `等待 ${runningSubagentCount} 个子代理完成协同任务`;
+        toolItems.push({ id: toolItems.length + 1, title: subTitle, status: isStalled ? 'stalled' : 'running', percent: 50 });
+      } else if (inActiveTurn && lifecycleEvent === 'PreToolUse') {
         const curAction = this.formatToolAction(hookToolName, hookToolArgs);
         if (curAction) {
           if (!toolItems.length || toolItems[toolItems.length - 1].title !== curAction) {
@@ -210,7 +296,36 @@ export class TaskMonitor {
         toolItems.push({ id: toolItems.length + 1, title: '完成验证并输出结果', status: 'pending', percent: 0 });
       }
       baseSteps = toolItems.slice(0, 8).map((s, idx) => ({ ...s, id: idx + 1 }));
-      hasRealSteps = tState.turnToolSteps.length >= 2 || (tState.turnToolSteps.length >= 1 && inActiveTurn);
+      hasRealSteps = activeTurnToolSteps.length >= 2 || (activeTurnToolSteps.length >= 1 && inActiveTurn) || hasRunningSubagents;
+    }
+
+    // 关键不变量：只要本轮仍在运行（含子代理运行中），步骤列表绝不能全部渲染为 completed
+    if (inActiveTurn && !custom && baseSteps.length > 0) {
+      const hasActiveStep = baseSteps.some(s => s.status === 'running' || s.status === 'stalled');
+      if (!hasActiveStep) {
+        const firstPendingIdx = baseSteps.findIndex(s => s.status !== 'completed');
+        if (firstPendingIdx >= 0) {
+          baseSteps[firstPendingIdx] = {
+            ...baseSteps[firstPendingIdx],
+            status: isStalled ? 'stalled' : 'running',
+            percent: 50
+          };
+        } else if (hasRunningSubagents && baseSteps.length < 8) {
+          baseSteps.push({
+            id: baseSteps.length + 1,
+            title: `等待 ${runningSubagentCount} 个子代理完成协同任务`,
+            status: isStalled ? 'stalled' : 'running',
+            percent: 50
+          });
+        } else {
+          const lastIdx = baseSteps.length - 1;
+          baseSteps[lastIdx] = {
+            ...baseSteps[lastIdx],
+            status: isStalled ? 'stalled' : 'running',
+            percent: 50
+          };
+        }
+      }
     }
 
     let steps = baseSteps;
@@ -218,7 +333,7 @@ export class TaskMonitor {
       if (status === 'running' || status === 'stalled') {
         steps = [
           { id: 1, title: '接收指令与上下文准备', status: 'completed', percent: 100 },
-          { id: 2, title: headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹)\s*/u, ''), status: isStalled ? 'stalled' : 'running', percent: 50 },
+          { id: 2, title: headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹|🔄)\s*/u, ''), status: isStalled ? 'stalled' : 'running', percent: 50 },
           { id: 3, title: '整理结果并完成交付', status: 'pending', percent: 0 }
         ];
       } else {
@@ -231,7 +346,7 @@ export class TaskMonitor {
       steps = steps.map(s => (s.status === 'running' ? { ...s, status: 'stalled' } : s));
     }
 
-    // 8. 计算总进度百分比
+    // 8. 计算总进度百分比（运行中严禁提前显示 100%）
     const completedCount = steps.filter(s => s.status === 'completed').length;
     const activeCount = steps.filter(s => s.status === 'running' || s.status === 'stalled').length;
     let progressPercent = 0;
@@ -240,44 +355,104 @@ export class TaskMonitor {
     } else if (steps.length > 0) {
       progressPercent = Math.round(((completedCount + activeCount * 0.5) / steps.length) * 100);
       if (completedCount === steps.length) progressPercent = 100;
+      if (!turnFinished && !custom && progressPercent >= 100) progressPercent = 95;
     }
 
-    // 9. 本轮真实耗时（结束即冻结）
+    // 9. 本轮真实耗时（结束即冻结；若子代理仍在运行则持续计时）
     let elapsedSeconds = 0;
-    if (tState.turnStartMs > 0) {
+    if (effectiveTurnStartMs > 0) {
       const endRef = turnFinished
-        ? (tState.turnEndMs >= tState.turnStartMs ? tState.turnEndMs : (lifecycleMs >= tState.turnStartMs ? lifecycleMs : tState.turnStartMs))
+        ? Math.max(
+            tState.turnEndMs >= effectiveTurnStartMs ? tState.turnEndMs : 0,
+            lifecycleMs >= effectiveTurnStartMs ? lifecycleMs : 0,
+            cascadeState?.latestSubagentModifiedMs >= effectiveTurnStartMs ? cascadeState.latestSubagentModifiedMs : 0,
+            effectiveTurnStartMs
+          )
         : now;
-      elapsedSeconds = Math.max(0, Math.round((endRef - tState.turnStartMs) / 1000));
+      elapsedSeconds = Math.max(0, Math.round((endRef - effectiveTurnStartMs) / 1000));
     }
 
     const effectiveEvent = turnFinished && ['PreInvocation', 'PreToolUse'].includes(lifecycleEvent)
       ? 'Idle'
       : lifecycleEvent;
-    const dataSource = effectiveEvent
-      ? `hooks (${effectiveEvent}) · transcript`
-      : 'transcript.jsonl';
+    const dataSource = hasRunningSubagents
+      ? `subagents (${runningSubagentCount}) · transcript`
+      : effectiveEvent
+        ? `hooks (${effectiveEvent}) · transcript`
+        : 'transcript.jsonl';
+
+    const effectiveLatestTask = !turnFinished
+      ? (latestTask
+        ? {
+            name: latestTask.name,
+            isDone: false,
+            lastLine: latestTask.lastLine.slice(0, 140),
+            elapsed: latestTask.elapsed
+          }
+        : hasRunningSubagents
+          ? {
+              name: `${runningSubagentCount} 个子代理运行中`,
+              isDone: false,
+              lastLine: subagentProbe.latestAction
+                ? `${runningSubagentCount} 个子代理正在协同 · ${subagentProbe.latestAction}`
+                : `${runningSubagentCount} 个子代理正在后台并行推进`,
+              elapsed: silenceSec
+            }
+          : null)
+      : null;
 
     return {
       status,
       progressPercent,
       headline,
-      objective: filePlan?.objective || tState.objective || '实时监控当前窗口项目进度，防止执行卡死',
+      objective: filePlan?.objective || (pendingNewUserTurn ? hookInputGoal : '') || tState.objective || '实时监控当前窗口项目进度，防止执行卡死',
       isStalled,
       stalledDuration: isStalled ? silenceSec : 0,
       stalledReason,
       elapsedSeconds,
       dataSource,
-      turnStepIdx: tState.turnStepIdx,
+      runningSubagents: runningSubagentCount,
+      turnStepIdx: pendingNewUserTurn ? (tState.turnStepIdx + 1) : tState.turnStepIdx,
       showInlineCard: Boolean(hasRealSteps && steps.length >= 2),
       steps,
-      latestTask: latestTask && !turnFinished ? {
-        name: latestTask.name,
-        isDone: false,
-        lastLine: latestTask.lastLine.slice(0, 140),
-        elapsed: latestTask.elapsed
-      } : null
+      latestTask: effectiveLatestTask
     };
+  }
+
+  async probeSubagentsActivity(runningIds) {
+    let latestMtimeMs = 0;
+    let latestAction = '';
+    if (!Array.isArray(runningIds) || !runningIds.length) return { latestMtimeMs, latestAction };
+    for (const rawId of runningIds.slice(0, 6)) {
+      const cid = String(rawId || '').toLowerCase();
+      if (!GUID.test(cid)) continue;
+      const childTranscript = join(this.brainRoot, cid, '.system_generated', 'logs', 'transcript.jsonl');
+      const childLifecycle = join(this.brainRoot, cid, 'scratch', 'lifecycle_state.json');
+      try {
+        const st = await stat(childTranscript);
+        if (st.mtimeMs > latestMtimeMs) {
+          latestMtimeMs = st.mtimeMs;
+          const tail = await this.readTailText(childTranscript, 4096);
+          const lines = tail.split('\n').filter(Boolean);
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const step = JSON.parse(lines[i]);
+              const tcs = Array.isArray(step?.tool_calls) ? step.tool_calls : [];
+              for (let j = tcs.length - 1; j >= 0; j--) {
+                const label = this.formatToolAction(tcs[j]?.name, tcs[j]?.args);
+                if (label) { latestAction = label; break; }
+              }
+              if (latestAction) break;
+            } catch {}
+          }
+        }
+      } catch {}
+      try {
+        const lst = await stat(childLifecycle);
+        if (lst.mtimeMs > latestMtimeMs) latestMtimeMs = lst.mtimeMs;
+      } catch {}
+    }
+    return { latestMtimeMs, latestAction };
   }
 
   unwrapArg(val) {
@@ -360,6 +535,26 @@ export class TaskMonitor {
       const role = this.unwrapArg(args?.Role) || this.unwrapArg(args?.TypeName);
       return role ? `调用子代理：${this.truncateClean(role, 24)}` : '调用子代理协同处理';
     }
+    if (name === 'define_subagent') {
+      const subName = this.unwrapArg(args?.Name);
+      return subName ? `定义子代理：${this.truncateClean(subName, 24)}` : '定义专用子代理';
+    }
+    if (name === 'manage_subagents') return '管理子代理运行状态';
+    if (name === 'swarm') {
+      const act = this.unwrapArg(args?.action);
+      const worker = this.unwrapArg(args?.name);
+      if (act === 'add') return worker ? `派发子代理：${this.truncateClean(worker, 22)}` : '派发子代理协同执行';
+      if (act === 'status') return '检查子代理团队运行进度';
+      if (act === 'kill') return worker ? `回收子代理：${this.truncateClean(worker, 22)}` : '回收已完成子代理';
+      if (act === 'title') return '初始化多子代理协作看板';
+      return '协同调度子代理团队';
+    }
+    if (name === 'send_message') return '向子代理发送协作消息';
+    if (name === 'read_board') return '读取子代理协作看板消息';
+    if (name === 'post_message') return '同步结论至子代理协作看板';
+    if (name === 'wait_for_message') return '等待子代理看板消息回调';
+    if (name === 'manage_task') return '检查后台任务执行状态';
+    if (name === 'schedule') return '配置定时监控任务';
     if (name === 'search_web') {
       const q = this.unwrapArg(args?.query);
       return q ? `联网检索：${this.truncateClean(q, 24)}` : '联网检索资料';
@@ -393,15 +588,19 @@ export class TaskMonitor {
         offset: 0,
         lastSize: 0,
         lastGrowthMs: 0,
+        firstSeenStepMs: 0,
         remainder: '',
         steps: [],
         turnToolSteps: [],
         planStepIdx: -1,
         modelStepsAfterPlan: 0,
         objective: '',
+        lastUserInputGoal: '',
         turnStepIdx: -1,
         turnStartMs: 0,
         turnEndMs: 0,
+        prevTurnEndMs: 0,
+        lastErrorMs: 0,
         lastStepFinished: true
       };
     }
@@ -459,12 +658,23 @@ export class TaskMonitor {
 
         const stepTs = step.created_at ? Date.parse(step.created_at) : 0;
         const stepIdx = typeof step.step_index === 'number' ? step.step_index : -1;
+        if (stepTs > 0 && (!cache.firstSeenStepMs || stepTs < cache.firstSeenStepMs)) {
+          cache.firstSeenStepMs = stepTs;
+        }
+
+        if (step.type === 'ERROR_MESSAGE') {
+          cache.lastErrorMs = stepTs || now;
+          continue;
+        }
 
         if (step.type === 'USER_INPUT' && step.source === 'USER_EXPLICIT') {
           if (stepIdx !== cache.turnStepIdx) {
+            if (cache.turnEndMs > 0) cache.prevTurnEndMs = cache.turnEndMs;
+            else if (stepTs > 0 && cache.turnStartMs > 0) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, stepTs - 200);
             cache.turnStepIdx = stepIdx;
             cache.turnStartMs = stepTs || now;
             cache.turnEndMs = 0;
+            cache.lastErrorMs = 0;
             cache.lastStepFinished = false;
             cache.steps = [];
             cache.turnToolSteps = [];
@@ -472,9 +682,30 @@ export class TaskMonitor {
             cache.modelStepsAfterPlan = 0;
             this.customSteps.delete(conversationId);
             const userGoal = this.extractUserRequest(step.content);
-            if (userGoal && (!cache.objective || !/^(继续|继续吧|好的|好|开始|做|做吧|重试|ok|continue)$/i.test(userGoal))) {
-              cache.objective = userGoal;
+            if (userGoal) {
+              cache.lastUserInputGoal = userGoal;
+              if (!cache.objective || !/^(继续|继续吧|好的|好|开始|做|做吧|重试|ok|continue)/i.test(userGoal)) {
+                cache.objective = userGoal;
+              }
             }
+          }
+          continue;
+        }
+
+        // 子代理（Subagent / Swarm Worker）的首条输入往往是 SYSTEM_MESSAGE 或非 USER_EXPLICIT 的 USER_INPUT；同时主会话收到子代理回调 SYSTEM_MESSAGE 时代表本轮重新唤醒继续推进
+        if (step.type === 'SYSTEM_MESSAGE' || (step.type === 'USER_INPUT' && step.source !== 'USER_EXPLICIT')) {
+          if (cache.turnStepIdx === -1 && stepIdx >= 0) {
+            cache.turnStepIdx = stepIdx;
+            cache.turnStartMs = stepTs || now;
+            cache.turnEndMs = 0;
+            cache.lastStepFinished = false;
+            if (!cache.objective) {
+              const subGoal = this.extractSubagentPrompt(step.content);
+              if (subGoal) cache.objective = subGoal;
+            }
+          } else if (cache.turnStepIdx >= 0 && stepIdx > cache.turnStepIdx) {
+            cache.lastStepFinished = false;
+            cache.turnEndMs = 0;
           }
           continue;
         }
@@ -488,6 +719,7 @@ export class TaskMonitor {
             cache.turnEndMs = stepTs || now;
           } else {
             cache.lastStepFinished = false;
+            cache.turnEndMs = 0;
             for (const tc of toolCalls) {
               const label = this.formatToolAction(tc.name, tc.args);
               if (!label) continue;
@@ -536,6 +768,19 @@ export class TaskMonitor {
     } catch {}
 
     return cache;
+  }
+
+  extractSubagentPrompt(raw) {
+    if (!raw || typeof raw !== 'string') return '';
+    const msgMatch = raw.match(/<SYSTEM_MESSAGE>([\s\S]*?)<\/SYSTEM_MESSAGE>/i);
+    const body = (msgMatch ? msgMatch[1] : raw).trim();
+    const lines = body
+      .split('\n')
+      .map(l => l.replace(/^\[Message\][^\n]*$/i, '').trim())
+      .filter(l => l.length >= 4 && !l.startsWith('[board]') && !l.startsWith('The following is'));
+    const first = lines[0] || '';
+    if (!first) return '';
+    return first.length > 68 ? `${first.slice(0, 68)}…` : first;
   }
 
   extractUserRequest(raw) {

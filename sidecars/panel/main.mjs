@@ -38,7 +38,12 @@ const metrics = async input => {
   const s=runtimeSettings();
   const base=await store.snapshot(input);if(input?.usageSync===true)void usage.sync(true);
   if(s.autoChineseTitle!==false)titleRenamer.maybeSync(input?.conversationId);
-  const taskProgress=await taskMonitor.snapshot(input?.conversationId,{hostGenerating:input?.hostGenerating});
+  const cascadeState=typeof store.cascadeRunState==='function'?await store.cascadeRunState(input?.conversationId,{force:input?.force===true}):null;
+  const taskProgress=await taskMonitor.snapshot(input?.conversationId,{
+    hostGenerating:input?.hostGenerating,
+    domRunningSubagents:input?.domRunningSubagents,
+    cascadeState,
+  });
   return {...base,taskProgress,usage:await usage.snapshot({sync:input?.usageSync===true}),preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health};
 };
 const usageSource=()=>{const s=readFileSync(join(HERE,'..','..','compat','usage-ui.cjs'),'utf8');return `window.__agPulseUsageFactory=(${s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'')});`;};
