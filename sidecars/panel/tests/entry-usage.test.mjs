@@ -33,6 +33,7 @@ async function entryFixture(host,url,selection=false){
     'updater.mjs':{AppUpdater:class{},releaseRuntimeDirectory(){}},
     'history.mjs':{SessionHistory:class{}},'transcript.mjs':{TranscriptReader:class{},transcriptBrainRoot:()=>''},
     'task-monitor.mjs':{TaskMonitor:class{async snapshot(){return null;}}},
+    'title-renamer.mjs':{TitleRenamer:class{maybeSync(){} dispose(){}}},
     'client.mjs':{IdeClient:class{}},'runtime.mjs':{ideTargets:async()=>({targets:[],port:0})},
   };
   const entry=new SourceTextModule(source,{context,identifier:url,initializeImportMeta(meta){meta.url=url;}});

@@ -124,7 +124,8 @@ export class TaskMonitor {
         headline = `⚠️ 疑似卡住 (${silenceSec}s)`;
       } else if (lifecycleEvent === 'PreToolUse') {
         status = 'running';
-        headline = `⚙️ ${this.formatToolAction(hookToolName, hookToolArgs)}`;
+        const act = this.formatToolAction(hookToolName, hookToolArgs);
+        headline = act ? `⚙️ ${act}` : `🤔 思考推进中 (${silenceSec}s)`;
       } else if (hasBgTaskRunning && latestTask) {
         status = 'running';
         headline = `⚙️ 后台任务: ${latestTask.name}`;
@@ -194,11 +195,13 @@ export class TaskMonitor {
       }));
       if (inActiveTurn && lifecycleEvent === 'PreToolUse') {
         const curAction = this.formatToolAction(hookToolName, hookToolArgs);
-        if (!toolItems.length || toolItems[toolItems.length - 1].title !== curAction) {
-          toolItems.push({ id: toolItems.length + 1, title: curAction, status: isStalled ? 'stalled' : 'running', percent: 50 });
-        } else {
-          toolItems[toolItems.length - 1].status = isStalled ? 'stalled' : 'running';
-          toolItems[toolItems.length - 1].percent = 50;
+        if (curAction) {
+          if (!toolItems.length || toolItems[toolItems.length - 1].title !== curAction) {
+            toolItems.push({ id: toolItems.length + 1, title: curAction, status: isStalled ? 'stalled' : 'running', percent: 50 });
+          } else {
+            toolItems[toolItems.length - 1].status = isStalled ? 'stalled' : 'running';
+            toolItems[toolItems.length - 1].percent = 50;
+          }
         }
       } else if (inActiveTurn) {
         toolItems.push({ id: toolItems.length + 1, title: '汇总分析与生成回复', status: isStalled ? 'stalled' : 'running', percent: 50 });
@@ -277,19 +280,92 @@ export class TaskMonitor {
     };
   }
 
-  formatToolAction(name, args) {
-    if (!name) return '执行工具中';
-    if (name === 'run_command') {
-      if (args?.toolSummary) return `命令: ${String(args.toolSummary).replace(/^"|"$/g, '').slice(0, 32)}`;
-      if (args?.CommandLine) return `命令: ${String(args.CommandLine).trim().slice(0, 32)}`;
-      return '执行终端命令';
+  unwrapArg(val) {
+    if (val == null) return '';
+    if (typeof val !== 'string') return String(val);
+    let s = val.trim();
+    if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+      try { s = JSON.parse(s); } catch { s = s.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\'); }
     }
-    if (name === 'read_file' && args?.Path) return `读取 ${String(args.Path).split('/').pop()}`;
-    if (name === 'write_file' && args?.Path) return `写入 ${String(args.Path).split('/').pop()}`;
-    if (name === 'edit_file' && args?.Path) return `编辑 ${String(args.Path).split('/').pop()}`;
-    if (name === 'invoke_subagent') return `调用子代理 ${args?.Role || args?.TypeName || ''}`.trim();
-    if (name === 'search_web') return `网页检索: ${String(args?.query || '').slice(0, 24)}`;
-    return `执行 ${name}`;
+    return String(s ?? '').replace(/^["']+|["']+$/g, '').trim();
+  }
+
+  truncateClean(str, maxLen = 34) {
+    const s = String(str || '').replace(/\s+/g, ' ').trim();
+    if (s.length <= maxLen) return s;
+    const cut = s.slice(0, maxLen);
+    const spaceIdx = cut.lastIndexOf(' ');
+    if (spaceIdx >= maxLen - 10 && /[a-zA-Z]$/.test(cut)) {
+      return `${cut.slice(0, spaceIdx).trim()}…`;
+    }
+    return `${cut.trim()}…`;
+  }
+
+  describeCommand(rawSummary, rawCmd) {
+    const summary = this.unwrapArg(rawSummary).replace(/^(?:命令|执行命令|终端)[:：]\s*/i, '').trim();
+    const cmd = this.unwrapArg(rawCmd);
+    if (summary && /\p{Script=Han}/u.test(summary)) {
+      return this.truncateClean(summary, 34);
+    }
+    const lowerCmd = cmd.toLowerCase();
+    const lowerSum = summary.toLowerCase();
+    if (/pkill|killall/.test(lowerCmd) && /cdpconnection|runtime\.evaluate|pgrep/.test(lowerCmd)) return '重启后台服务并验证实时状态';
+    if (/pkill|killall/.test(lowerCmd)) return '重启后台服务进程';
+    if (/cdpconnection|runtime\.evaluate|devtoolsactiveport/.test(lowerCmd)) return '验证页面实时渲染与节点状态';
+    if (/new function\(|--check|tsc\b.*--noemit/.test(lowerCmd)) return '校验脚本语法与数据快照';
+    const dbMatch = cmd.match(/([a-zA-Z0-9_.-]+\.(?:db|sqlite3?))\b/i);
+    if (/sqlite3\b/.test(lowerCmd) && dbMatch) return `查询数据库 ${dbMatch[1]} 内容`;
+    if (/sqlite3\b/.test(lowerCmd)) return '查询本地 SQLite 数据库';
+    if (/\bgit\s+(status|diff|log|branch|show)\b/.test(lowerCmd) || /git status|git diff/.test(lowerSum)) return '检查 Git 仓库变更状态';
+    if (/\bgit\s+(commit|push|merge|rebase)\b/.test(lowerCmd)) return '提交并同步 Git 代码变更';
+    if (/\b(pytest|vitest|jest|mocha)\b|\b(npm|pnpm|yarn|cargo|go|node)\s+(run\s+)?test\b/.test(lowerCmd) || /unit test|run test/.test(lowerSum)) return '运行自动化测试验证';
+    if (/\b(npm|pnpm|yarn|cargo|vite|tsc)\s+(run\s+)?build\b/.test(lowerCmd) || /package build|build project/.test(lowerSum)) return '编译构建项目产物';
+    if (/\b(npm|pnpm|yarn|pip|uv|brew)\s+(install|add|i)\b/.test(lowerCmd)) return '安装项目依赖包';
+    if (/\bstrings\b/.test(lowerCmd) || /language_server/.test(lowerCmd)) return '分析宿主底层接口定义';
+    if (/\b(ps\s+aux|pgrep|lsof)\b/.test(lowerCmd)) return '检查后台运行进程状态';
+    if (/\b(curl|wget)\b/.test(lowerCmd)) return '请求接口并检查响应结果';
+    if (/\b(rg|grep)\b/.test(lowerCmd) && !/ps\s+aux/.test(lowerCmd)) return '检索代码关键字匹配';
+    if (/^\s*(ls|find|stat|du)\b/.test(lowerCmd)) return '查看本地目录与配置结构';
+    if (summary) {
+      const target = (summary.match(/[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|\b(?:DOM|CDP|SDK|API|Git|SQL|DB|UI|CSS|JSON|MCP)\b/) || [])[0] || '';
+      if (/^(inspect|check|verify|validate)\b/i.test(summary)) return target ? `检查验证 ${target} 状态` : '检查系统配置与运行状态';
+      if (/^(read|view|list|show|get)\b/i.test(summary)) return target ? `查看 ${target} 详情` : '查看配置与状态信息';
+      if (/^(reload|restart|start)\b/i.test(summary)) return target ? `重启并加载 ${target}` : '启动或重载本地服务';
+      if (/^(fix|update|patch|sync)\b/i.test(summary)) return target ? `更新同步 ${target}` : '执行配置更新修复';
+      return this.truncateClean(summary, 32);
+    }
+    const firstBin = cmd.trim().split(/\s+/)[0]?.split('/').pop() || '';
+    return firstBin ? `执行 ${this.truncateClean(firstBin, 18)} 脚本任务` : '执行终端验证操作';
+  }
+
+  formatToolAction(name, args) {
+    if (!name) return '执行操作中';
+    if (name === 'run_command') {
+      return this.describeCommand(args?.toolSummary, args?.CommandLine);
+    }
+    if (name === 'read_file' || name === 'write_file' || name === 'edit_file') {
+      const cleanPath = this.unwrapArg(args?.Path);
+      if (!cleanPath) return name === 'read_file' ? '查阅文件内容' : '更新项目文件';
+      const base = cleanPath.split(/[\\/]/).pop().replace(/^["']+|["']+$/g, '');
+      if (base === 'task_steps.json' || base === 'lifecycle_state.json') return null;
+      if (name === 'read_file') {
+        if (/\.(png|jpe?g|webp|gif|svg)$/i.test(base)) return `查看截图 ${base}`;
+        if (/\/skills\/|\.md$/i.test(cleanPath)) return `查阅文档 ${base}`;
+        return `读取 ${base} 代码`;
+      }
+      if (name === 'edit_file') return `修改 ${base} 代码`;
+      return `写入文件 ${base}`;
+    }
+    if (name === 'invoke_subagent') {
+      const role = this.unwrapArg(args?.Role) || this.unwrapArg(args?.TypeName);
+      return role ? `调用子代理：${this.truncateClean(role, 24)}` : '调用子代理协同处理';
+    }
+    if (name === 'search_web') {
+      const q = this.unwrapArg(args?.query);
+      return q ? `联网检索：${this.truncateClean(q, 24)}` : '联网检索资料';
+    }
+    if (name === 'search_marketplace') return '检索插件市场扩展';
+    return `调用工具 ${name}`;
   }
 
   async readTailText(filePath, maxBytes) {
@@ -414,7 +490,20 @@ export class TaskMonitor {
             cache.lastStepFinished = false;
             for (const tc of toolCalls) {
               const label = this.formatToolAction(tc.name, tc.args);
-              if (label && cache.turnToolSteps[cache.turnToolSteps.length - 1] !== label) {
+              if (!label) continue;
+              const prev = cache.turnToolSteps[cache.turnToolSteps.length - 1] || '';
+              // 连续查阅多个文档或代码文件时合并为一行，避免刷屏
+              const readDocMatch = label.match(/^(查阅文档|读取)\s+([^\s、]+)(?:\s+代码)?$/);
+              const prevDocMatch = prev.match(/^(查阅文档|读取)\s+(.+?)(?:\s+代码)?$/);
+              if (readDocMatch && prevDocMatch && readDocMatch[1] === prevDocMatch[1]) {
+                const items = prevDocMatch[2].split('、');
+                if (!items.includes(readDocMatch[2]) && items.length < 3) {
+                  const joined = [...items, readDocMatch[2]].join('、');
+                  cache.turnToolSteps[cache.turnToolSteps.length - 1] = readDocMatch[1] === '读取' ? `读取 ${joined} 代码` : `查阅文档 ${joined}`;
+                  continue;
+                }
+              }
+              if (prev !== label) {
                 cache.turnToolSteps.push(label);
               }
             }

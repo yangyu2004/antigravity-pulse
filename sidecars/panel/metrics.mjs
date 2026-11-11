@@ -158,6 +158,74 @@ export function trajectoryMetrics(response) {
   const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata.startedAt || s.metadata.createdAt), Date.parse(s.metadata.completedAt)]));
   const latest = samples.at(-1) || null;
   const lastChat = [...generators].reverse().find(g => g.chatModel)?.chatModel;
+  const chatModelLabel = chat => chat?.modelDisplayName || chat?.responseModel || String(chat?.model || chat?.usage?.model || '');
+  const sameModelAs = (a, b) => {
+    if (!a || !b) return false;
+    const ma = chatModelLabel(a), mb = chatModelLabel(b);
+    if (!ma || ma === mb) return true;
+    return Boolean(a.model && b.model && String(a.model) === String(b.model));
+  };
+  let ctxGen = null;
+  const lastGenWithChat = [...generators].reverse().find(g => g?.chatModel) || null;
+  if (lastGenWithChat && tokenCount(lastGenWithChat.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null) {
+    ctxGen = lastGenWithChat;
+  } else if (lastGenWithChat && !lastGenWithChat.chatModel?.usage) {
+    const prevWithCtx = [...generators].reverse().find(g => tokenCount(g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null);
+    if (prevWithCtx && sameModelAs(lastGenWithChat.chatModel, prevWithCtx.chatModel)) ctxGen = prevWithCtx;
+  }
+  const isDoneCheckpoint = step =>
+    /CHECKPOINT/i.test(String(step?.type || '')) &&
+    step?.status !== 'CORTEX_STEP_STATUS_RUNNING' &&
+    step?.status !== 'CORTEX_STEP_STATUS_PENDING' &&
+    Boolean(step?.checkpoint || step?.metadata?.completedAt || step?.metadata?.modelUsage || step?.status === 'CORTEX_STEP_STATUS_DONE');
+  const checkpointSummaryTokens = step =>
+    tokenCount(step?.metadata?.modelUsage?.responseOutputTokens) ??
+    tokenCount(step?.metadata?.modelUsage?.outputTokens) ??
+    tokenCount(typeof step?.checkpoint?.sessionSummary === 'number' ? step.checkpoint.sessionSummary : step?.checkpoint?.sessionSummary?.tokens) ??
+    0;
+  const ckptIndices = [];
+  for (let i = 0; i < steps.length; i++) if (isDoneCheckpoint(steps[i])) ckptIndices.push(i);
+  const lastCkptIdx = ckptIndices.length ? ckptIndices.at(-1) : -1;
+  const ctxStepIdx = ctxGen ? Math.max(-1, ...(ctxGen.stepIndices || []).filter(i => Number.isInteger(i) && i >= 0)) : -1;
+  let resolvedContext = null;
+  if (lastCkptIdx >= 0 && lastCkptIdx > ctxStepIdx && ctxGen) {
+    const ckptStep = steps[lastCkptIdx];
+    const summaryTokens = checkpointSummaryTokens(ckptStep);
+    const preCompactUsed = tokenCount(ctxGen.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed);
+    const rawMax = tokenCount(ctxGen.chatModel?.chatStartMetadata?.contextWindowMetadata?.maxContextTokens);
+    let baseSystemTokens = null;
+    for (let k = ckptIndices.length - 2; k >= 0; k--) {
+      const prevIdx = ckptIndices[k], nextBound = ckptIndices[k + 1];
+      const afterGen = generators.find(g => (g?.stepIndices || []).some(i => Number.isInteger(i) && i > prevIdx && i < nextBound) &&
+        tokenCount(g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null);
+      if (afterGen) {
+        const afterUsed = tokenCount(afterGen.chatModel.chatStartMetadata.contextWindowMetadata.estimatedTokensUsed);
+        baseSystemTokens = Math.max(0, afterUsed - checkpointSummaryTokens(steps[prevIdx]));
+        break;
+      }
+    }
+    if (baseSystemTokens === null) {
+      const firstGen = generators.find(g => tokenCount(g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null);
+      const firstUsed = tokenCount(firstGen?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed);
+      const baseCap = rawMax > 0 ? Math.round(rawMax * 0.15) : 32000;
+      baseSystemTokens = firstUsed !== null ? Math.min(firstUsed, baseCap) : 0;
+    }
+    let compactedUsed = baseSystemTokens + summaryTokens;
+    if (preCompactUsed !== null) compactedUsed = Math.min(preCompactUsed, compactedUsed);
+    resolvedContext = contextMetrics(
+      { estimatedTokensUsed: compactedUsed, maxContextTokens: ctxGen.chatModel?.chatStartMetadata?.contextWindowMetadata?.maxContextTokens },
+      {
+        model: chatModelLabel(ctxGen.chatModel) || String(ckptStep?.metadata?.modelUsage?.model || ''),
+        sampledAt: ckptStep?.metadata?.completedAt || ckptStep?.metadata?.createdAt || ctxGen.chatModel?.chatStartMetadata?.createdAt,
+      }
+    );
+  } else {
+    const ctxChat = ctxGen?.chatModel || lastChat;
+    resolvedContext = contextMetrics(ctxChat?.chatStartMetadata?.contextWindowMetadata, {
+      model: ctxChat?.modelDisplayName || ctxChat?.responseModel || String(ctxChat?.model || ''),
+      sampledAt: ctxChat?.chatStartMetadata?.createdAt,
+    });
+  }
   const inputParts=[tokens.uncachedTokens,tokens.cachedTokens,tokens.cacheWriteTokens];
   tokens.inputTokens = tokenCount(inputParts.reduce((sum,value)=>sum+(value??0),0));
   const totalTokens=tokenCount((tokens.inputTokens??0)+(tokens.outputTokens??0));
@@ -174,10 +242,7 @@ export function trajectoryMetrics(response) {
     rateBasis: basisSamples.length && basisSamples.every(s => s.basis === 'response') ? 'response' : 'all-output',
     streamingSeconds, modelSeconds, toolSeconds, ttftSeconds: ttftSamples ? ttftSeconds / ttftSamples : null,
     latestShortSample: latest?.status === 'ok' && latest.duration < 1, model: latest?.model || null,
-    context: contextMetrics(lastChat?.chatStartMetadata?.contextWindowMetadata, {
-      model:lastChat?.modelDisplayName || lastChat?.responseModel || String(lastChat?.model || ''),
-      sampledAt:lastChat?.chatStartMetadata?.createdAt,
-    }),
+    context: resolvedContext,
     complete: Number(response.numTotalGeneratorMetadata ?? generators.length) === generators.length,
   };
 }

@@ -14,6 +14,7 @@ import { readHostTheme } from '../../compat/host-theme.mjs';
 import { panelAppSource,panelPageSource } from './panel-source.mjs';
 import { AppUpdater, releaseRuntimeDirectory } from './updater.mjs';
 import { TaskMonitor } from './task-monitor.mjs';
+import { TitleRenamer } from './title-renamer.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // The host starts this sidecar in sidecars/panel. Windows holds the process's
@@ -30,11 +31,13 @@ const usage=new DesktopUsage(store,undefined,{host:'app',owns});
 store.onTrajectory=async(scope,id,raw)=>{if(!ownership||await ownership.isOwner())await usage.ingest(scope,id,raw);};
 const preferences=new PreferencesStore();
 const taskMonitor=new TaskMonitor();
+const titleRenamer=new TitleRenamer({client:store.client,dataDir:paths.data});
 const updater=new AppUpdater({pluginDir:join(HERE,'..','..'),dataDir:paths.data});
 const metrics = async input => {
   if(ownership&&!await ownership.isOwner())throw Error('Sidecar ownership changed');
-  runtimeSettings();
+  const s=runtimeSettings();
   const base=await store.snapshot(input);if(input?.usageSync===true)void usage.sync(true);
+  if(s.autoChineseTitle!==false)titleRenamer.maybeSync(input?.conversationId);
   const taskProgress=await taskMonitor.snapshot(input?.conversationId,{hostGenerating:input?.hostGenerating});
   return {...base,taskProgress,usage:await usage.snapshot({sync:input?.usageSync===true}),preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health};
 };

@@ -575,7 +575,8 @@ module.exports = function installAgPulseInlineWidget() {
     .footnote[hidden]{display:none}
     #transcript-details{margin-top:12px;border-top:1px solid var(--pulse-separator);padding-top:10px}#transcript-details summary{cursor:pointer;font-size:11px;color:var(--pulse-label)}#transcript-total{float:right;margin-left:8px;font-variant-numeric:tabular-nums;color:var(--pulse-foreground);font-size:10px}
     .bar{gap:6px}.chip{font-size:11px;gap:5px;padding:3px 5px}.context-card>strong{font-size:16px}.context-card>p{margin:8px 0}.quota-heading{margin-top:14px;padding-top:12px;border-top:1px solid var(--pulse-separator)}.quota-title{display:flex;align-items:center;gap:6px;font-size:11px}.quota-title>span:first-child{display:flex;align-items:center;gap:6px;margin-right:auto}.quota-title strong{font-variant-numeric:tabular-nums;font-size:13px}.quota-section+.quota-section{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:12px}.quota-section .track{margin:8px 0}.quota-section .footnote{margin-top:6px}.quota-section dl div{margin:6px 0}.context-label{white-space:nowrap}
-    :host(.icons-only) .bar{gap:2px}:host(.icons-only) .chip{flex:0 0 24px;width:24px;min-width:24px;height:24px;padding:0;gap:0;justify-content:center}:host(.icons-only) .chip>:not(svg):not(.context-ring){display:none}:host(.icons-only) .bar>.language-button,:host(.icons-only) .bar>.dot{display:none}:host(.icons-only) .chip svg{display:block}.card-language{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}
+    :host(.icons-only) .bar{gap:2px}:host(.icons-only) .chip{flex:0 0 24px;width:24px;min-width:24px;height:24px;padding:0;gap:0;justify-content:center}:host(.icons-only) .chip>:not(svg):not(.context-ring):not(.task-indicator){display:none}:host(.icons-only) .bar>.language-button,:host(.icons-only) .bar>.dot{display:none}:host(.icons-only) .chip svg{display:block}.card-language{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}
+    .usage-entry{margin-top:10px;padding-top:10px;border-top:1px solid var(--pulse-separator)}.usage-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}.usage-summary>div{padding:6px 8px;border-radius:7px;background:var(--pulse-control);border:1px solid var(--pulse-separator);display:flex;flex-direction:column;gap:2px}.usage-summary label{font-size:9.5px;color:var(--pulse-muted)}.usage-summary strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}.usage-unit{font-size:9.5px;color:var(--pulse-muted);font-weight:400;margin-left:3px}#open-usage{width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-radius:7px;border:1px solid var(--pulse-border);background:var(--pulse-control);color:var(--pulse-foreground);font-size:10.5px;font-weight:500;cursor:pointer;transition:background 140ms ease}#open-usage:hover{background:var(--pulse-hover)}.quota-details{margin-top:12px;padding-top:11px;border-top:1px solid var(--pulse-separator)}
     .refresh{display:inline-grid;place-items:center}.refresh[aria-busy=true]{color:var(--pulse-emphasis);cursor:wait}.refresh[aria-busy=true] svg{animation:pulse-refresh-spin 1s linear infinite;transform-origin:center}
     @keyframes pulse-refresh-spin{to{transform:rotate(360deg)}}
     .task-chip{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:5px;font-size:11px;color:var(--pulse-chip);background:transparent;border:0;transition:all 140ms ease;cursor:pointer;}
@@ -584,7 +585,7 @@ module.exports = function installAgPulseInlineWidget() {
     .task-chip.running{color:var(--pulse-accent);}
     .task-indicator{font-size:10px;font-weight:600;line-height:1;}
     .task-percent-badge{font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;opacity:.9;}
-    .task-title-snippet{max-width:105px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;}
+    .task-title-snippet{max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;}
     .task-progress-card{width:345px;max-width:calc(100vw - 24px);padding:13px 14px;border-radius:13px;background:var(--pulse-card);border:1px solid var(--pulse-border);box-shadow:0 10px 32px var(--pulse-shadow);color:var(--pulse-foreground);display:flex;flex-direction:column;gap:9px;}
     .tp-header{display:flex;align-items:center;gap:11px;}
     .tp-gauge{position:relative;width:42px;height:42px;flex:none;}
@@ -640,8 +641,65 @@ module.exports = function installAgPulseInlineWidget() {
     @media(prefers-reduced-motion:reduce){.refresh[aria-busy=true] svg{animation:none;opacity:.65}}
     </style><div class="bar" data-i18n-aria="strip" aria-label="Dashboard statistics">
       <span class="dot" id="dot" title="Connecting" hidden></span>
-      <button class="chip task-chip" data-card="task-progress" data-i18n-aria="taskProgress" id="task-chip" aria-controls="task-progress-card" aria-expanded="false"><span class="task-indicator" id="task-indicator">○</span><span class="task-percent-badge" id="task-percent-badge">0%</span><span class="task-title-snippet" id="task-title-snippet">项目进度</span></button>
-    </div><section class="card task-progress-card" id="task-progress-card" role="region" data-i18n-aria="taskCardTitle" aria-label="项目分阶段进度与防卡住监控" hidden><div class="tp-header"><div class="tp-gauge"><svg class="tp-ring-svg" viewBox="0 0 44 44"><circle class="tp-ring-track" cx="22" cy="22" r="18"/><circle class="tp-ring-fill" id="tp-ring-fill" cx="22" cy="22" r="18" stroke-dasharray="113.1" stroke-dashoffset="113.1"/></svg><div class="tp-gauge-text" id="tp-gauge-percent">0%</div></div><div class="tp-meta"><div class="tp-status-row"><span class="tp-badge" id="tp-status-badge">● 进行中</span><span class="tp-elapsed" id="tp-elapsed">00:00</span><button type="button" class="tp-btn-reinvoke" id="tp-reinvoke-btn" title="检测到卡顿时立即重新调起">⚡ 重新调起</button></div><div class="tp-headline" id="tp-headline">正在检测项目进度...</div><div class="tp-track"><div class="tp-track-fill" id="tp-track-fill"></div></div></div><button type="button" class="tp-close" id="tp-close-btn" title="收起">✕</button></div><div class="tp-stalled-banner" id="tp-stalled-banner" hidden><svg viewBox="0 0 16 16" class="tp-warn-icon"><path d="M8 2l6.5 11.5H1.5L8 2zM8 6.5v3M8 11.5h.01"/></svg><div class="tp-stalled-text" id="tp-stalled-text">检测到当前任务超过 35 秒无日志更新，可能处于卡顿状态</div></div><div class="tp-objective" id="tp-objective">实时监控当前窗口项目进度，防止执行卡死</div><div class="tp-section-header"><span class="tp-section-title" id="tp-section-title">📋 项目分阶段执行进度</span><span class="tp-source-tag" id="tp-source-tag">数据源: transcript.jsonl</span></div><div class="tp-steps-list" id="tp-steps-list"></div><div class="tp-footer"><span class="tp-task-log" id="tp-task-log">准备就绪</span><button type="button" class="tp-refresh-btn" id="tp-refresh-btn" title="刷新进度">刷新</button></div></section>`);
+      <button class="chip" type="button" data-card="speed" data-i18n-aria="session" aria-controls="speed-card" aria-expanded="false">${svg('speed')}<strong id="tps">—</strong><span class="dim">tok/s</span></button>
+      <button class="chip" type="button" data-card="cache" data-i18n-aria="cache" aria-controls="cache-card" aria-expanded="false">${svg('cache')}<strong id="cache-rate">—</strong><span class="dim cache-total" id="cache-total"></span></button>
+      <button class="chip" type="button" data-card="context" data-i18n-aria="context" aria-controls="context-card" aria-expanded="false"><span class="context-ring" id="context-ring" aria-hidden="true"></span><strong id="context-percent">—</strong><span class="dim context-label" data-i18n="contextShort"></span></button>
+      <button class="chip task-chip" type="button" data-card="task-progress" data-i18n-aria="taskProgress" id="task-chip" aria-controls="task-progress-card" aria-expanded="false"><span class="task-indicator" id="task-indicator">○</span><span class="task-percent-badge" id="task-percent-badge">0%</span><span class="task-title-snippet" id="task-title-snippet">项目进度</span></button>
+    </div>
+    <section class="card" id="speed-card" role="region" data-i18n-aria="session" hidden>
+      <div class="heading"><span>${svg('speed')}<span data-i18n="session"></span></span><div class="toolbar"><span class="tag" id="samples">—</span><button type="button" class="refresh" data-i18n-aria="refreshStats" title="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 6a5.1 5.1 0 1 0 .1 4M12.8 2.5V6H9.2"/></svg></button></div></div>
+      <dl>
+        <div><dt data-i18n="modelTime"></dt><dd id="model-time">—</dd></div>
+        <div><dt data-i18n="toolTime"></dt><dd id="tool-time">—</dd></div>
+        <div><dt data-i18n="ttft"></dt><dd id="ttft">—</dd></div>
+        <div class="emphasis"><dt data-i18n="sessionTps"></dt><dd><span id="session-tps">—</span> tok/s</dd></div>
+        <div><dt data-i18n="latest"></dt><dd id="latest-tps">—</dd></div>
+        <div><dt data-i18n="tokens"></dt><dd id="tokens">—</dd></div>
+      </dl>
+      <p class="footnote" id="rate-note"></p>
+    </section>
+    <section class="card" id="cache-card" role="region" data-i18n-aria="cacheTitle" hidden>
+      <div class="heading"><span>${svg('cache')}<span data-i18n="cacheTitle"></span></span><div class="toolbar"><span class="tag" id="cache-coverage">—</span><button type="button" class="refresh" data-i18n-aria="refreshStats" title="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 6a5.1 5.1 0 1 0 .1 4M12.8 2.5V6H9.2"/></svg></button></div></div>
+      <dl>
+        <div class="emphasis"><dt data-i18n="cacheRate"></dt><dd id="cache-detail-rate">—</dd></div>
+        <div><dt data-i18n="cacheMiss"></dt><dd id="cache-miss">—</dd></div>
+        <div><dt data-i18n="cacheRead"></dt><dd id="cache-read">—</dd></div>
+        <div id="cache-write-row" hidden><dt data-i18n="cacheWrite"></dt><dd id="cache-write">—</dd></div>
+        <div><dt data-i18n="cacheOutput"></dt><dd id="cache-output">—</dd></div>
+        <div id="task-own-row" hidden><dt data-i18n="taskOwn"></dt><dd id="task-own">—</dd></div>
+        <div id="task-subagents-row" hidden><dt id="task-subagents-label"></dt><dd id="task-subagents">—</dd></div>
+      </dl>
+      <p class="footnote" id="cache-note" hidden></p>
+      <div class="usage-entry" id="usage-entry">
+        <div class="usage-summary">
+          <div><label id="usage-today-label">今日用量</label><strong><span id="usage-today">—</span><span class="usage-unit">Token</span></strong></div>
+          <div><label id="usage-month-label">本月用量</label><strong><span id="usage-month">—</span><span class="usage-unit">Token</span></strong></div>
+        </div>
+        <button type="button" id="open-usage"><span id="usage-open-label">查看用量统计</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8 4l4 4-4 4"/></svg></button>
+      </div>
+    </section>
+    <section class="card context-card" id="context-card" role="region" data-i18n-aria="context" hidden>
+      <div class="heading"><span>${svg('context')}<span data-i18n="context"></span></span><div class="toolbar"><button type="button" class="group-trigger" id="group-trigger" data-i18n-aria="selectGroup" aria-haspopup="listbox" aria-expanded="false">—</button><div class="group-menu" id="group-menu" role="listbox" hidden></div><button type="button" class="refresh" data-i18n-aria="refresh" title="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 6a5.1 5.1 0 1 0 .1 4M12.8 2.5V6H9.2"/></svg></button></div></div>
+      <strong id="context-summary">—</strong>
+      <p class="dim" id="context-tokens">—</p>
+      <div class="track" role="progressbar" data-i18n-aria="context" id="context-track"><i id="context-fill"></i></div>
+      <dl><div><dt data-i18n="contextModel"></dt><dd id="context-model">—</dd></div></dl>
+      <div class="quota-details">
+        <section class="quota-section" id="five-details" role="region" data-i18n-aria="five">
+          <div class="quota-title"><span>${svg('five')}<span data-i18n="five"></span></span><strong id="five-balance">—</strong><span class="tag group-name">—</span></div>
+          <div class="track" role="progressbar" data-i18n-aria="five" id="five-track"><i id="five-fill"></i></div>
+          <dl><div><dt data-i18n="resetIn"></dt><dd class="reset" id="five-countdown">—</dd></div><div><dt data-i18n="resetTime"></dt><dd id="five-reset">—</dd></div></dl>
+          <p class="footnote" id="five-note"></p>
+        </section>
+        <section class="quota-section" id="week-details" role="region" data-i18n-aria="week">
+          <div class="quota-title"><span>${svg('week')}<span data-i18n="week"></span></span><strong id="week-balance">—</strong><span class="tag group-name">—</span></div>
+          <div class="track" role="progressbar" data-i18n-aria="week" id="week-track"><i id="week-fill"></i></div>
+          <dl><div><dt data-i18n="resetIn"></dt><dd class="reset" id="week-countdown">—</dd></div><div><dt data-i18n="resetTime"></dt><dd id="week-reset">—</dd></div></dl>
+          <p class="footnote" id="week-note"></p>
+        </section>
+      </div>
+    </section>
+    <section class="card task-progress-card" id="task-progress-card" role="region" data-i18n-aria="taskCardTitle" aria-label="项目分阶段进度与防卡住监控" hidden><div class="tp-header"><div class="tp-gauge"><svg class="tp-ring-svg" viewBox="0 0 44 44"><circle class="tp-ring-track" cx="22" cy="22" r="18"/><circle class="tp-ring-fill" id="tp-ring-fill" cx="22" cy="22" r="18" stroke-dasharray="113.1" stroke-dashoffset="113.1"/></svg><div class="tp-gauge-text" id="tp-gauge-percent">0%</div></div><div class="tp-meta"><div class="tp-status-row"><span class="tp-badge" id="tp-status-badge">● 进行中</span><span class="tp-elapsed" id="tp-elapsed">00:00</span><button type="button" class="tp-btn-reinvoke" id="tp-reinvoke-btn" title="检测到卡顿时立即重新调起">⚡ 重新调起</button></div><div class="tp-headline" id="tp-headline">正在检测项目进度...</div><div class="tp-track"><div class="tp-track-fill" id="tp-track-fill"></div></div></div><button type="button" class="tp-close" id="tp-close-btn" title="收起">✕</button></div><div class="tp-stalled-banner" id="tp-stalled-banner" hidden><svg viewBox="0 0 16 16" class="tp-warn-icon"><path d="M8 2l6.5 11.5H1.5L8 2zM8 6.5v3M8 11.5h.01"/></svg><div class="tp-stalled-text" id="tp-stalled-text">检测到当前任务超过 35 秒无日志更新，可能处于卡顿状态</div></div><div class="tp-objective" id="tp-objective">实时监控当前窗口项目进度，防止执行卡死</div><div class="tp-section-header"><span class="tp-section-title" id="tp-section-title">📋 项目分阶段执行进度</span><span class="tp-source-tag" id="tp-source-tag">数据源: transcript.jsonl</span></div><div class="tp-steps-list" id="tp-steps-list"></div><div class="tp-footer"><span class="tp-task-log" id="tp-task-log">准备就绪</span><button type="button" class="tp-refresh-btn" id="tp-refresh-btn" title="刷新进度">刷新</button></div></section>`);
     row.insertBefore(node,branch.nextSibling);
     for(const card of root.querySelectorAll('.card')){const note=document.createElement('p');note.className='scope-note';note.dataset.i18n='subagentStats';card.querySelector('.heading')?.after(note);}
     const languageRow=document.createElement('div');languageRow.className='card-language';
@@ -673,7 +731,25 @@ module.exports = function installAgPulseInlineWidget() {
       #guide-save-note:empty,#language-save-note:empty{display:none}#guide-save-note,#language-save-note{color:var(--pulse-warning)}
     `;root.append(guideStyle);
     $('guide-close')?.addEventListener('click',()=>void dismissGuide());
-    $('guide-open')?.addEventListener('click',()=>{guideOpened=true;show('task-progress');});
+    $('guide-open')?.addEventListener('click',()=>{guideOpened=true;show('context');});
+    if(window.__agPulseUsageFactory){
+      usageDashboard=window.__agPulseUsageFactory({
+        root,language,setMarkup,hostLabel:composer?.kind==='ide'?'Antigravity IDE':'Antigravity',
+        guideDismissed:usageGuideDismissed,
+        onDismissGuide:async()=>{const v=await window.agPulseHost.setPreferences({usageGuideDismissed:true});syncGuide(v);preferences.sync(v);},
+        onLanguage:choice=>preferences.choose(choice),
+        onRefresh:()=>refreshManually(true),
+      });
+      $('open-usage')?.addEventListener('click',(e)=>{
+        e.stopPropagation();
+        const btn=e.currentTarget;
+        hide();
+        if(data?.usage)usageDashboard.open(data.usage,btn);
+        void refresh(true,true).then(()=>{if(data?.usage&&!usageDashboard.isOpen)usageDashboard.open(data.usage,btn);});
+      });
+    }else{
+      hidden($('usage-entry'),true);
+    }
     // Escape ancestor stacking/paint contexts; ordinary z-index cannot do this.
     if(typeof HTMLElement.prototype.showPopover==='function')for(const card of root.querySelectorAll('.card'))card.setAttribute('popover','manual');
     if(typeof guide.showPopover==='function')guide.setAttribute('popover','manual');
@@ -721,34 +797,41 @@ module.exports = function installAgPulseInlineWidget() {
     if(cancelBtn&&!cancelBtn.disabled&&visibleHostElement(cancelBtn))return true;
     return box.querySelector('[contenteditable="true"]')?false:null;
   }
+  let reinvoking=false;
   async function reinvokeHost(){
-    const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]');
-    const cancelBtn=box?.querySelector('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"]');
-    if(cancelBtn&&!cancelBtn.disabled&&visibleHostElement(cancelBtn)){
-      cancelBtn.click();
-      await new Promise(r=>setTimeout(r,450));
-    }
-    const targetEditor=composer?.editor||document.querySelector('[data-testid="agent-input-box"] [contenteditable="true"]');
-    if(!targetEditor)throw new Error('No editor');
-    targetEditor.focus();
-    const sel=window.getSelection();
-    if(sel){const range=document.createRange();range.selectNodeContents(targetEditor);range.collapse(false);sel.removeAllRanges();sel.addRange(range);}
-    const promptText=(targetEditor.textContent||'').trim()?'':'继续推进当前任务，若刚才卡住请换种方式执行';
-    if(promptText){
-      const ok=document.execCommand?.('insertText',false,promptText);
-      if(!ok||!(targetEditor.textContent||'').trim()){
-        targetEditor.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertText',data:promptText,bubbles:true,cancelable:true}));
+    if(reinvoking)return;
+    reinvoking=true;
+    try{
+      const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]');
+      const cancelBtn=box?.querySelector('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"]');
+      if(cancelBtn&&!cancelBtn.disabled&&visibleHostElement(cancelBtn)){
+        cancelBtn.click();
+        await new Promise(r=>setTimeout(r,450));
       }
+      const targetEditor=composer?.editor||document.querySelector('[data-testid="agent-input-box"] [contenteditable="true"]');
+      if(!targetEditor)throw new Error('No editor');
+      targetEditor.focus();
+      const sel=window.getSelection();
+      if(sel){const range=document.createRange();range.selectNodeContents(targetEditor);range.collapse(false);sel.removeAllRanges();sel.addRange(range);}
+      const promptText=(targetEditor.textContent||'').trim()?'':'继续推进当前任务，若刚才卡住请换种方式执行';
+      if(promptText){
+        const ok=document.execCommand?.('insertText',false,promptText);
+        if(!ok||!(targetEditor.textContent||'').trim()){
+          targetEditor.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertText',data:promptText,bubbles:true,cancelable:true}));
+        }
+      }
+      await new Promise(r=>setTimeout(r,140));
+      const currentBox=targetEditor.closest('[data-testid="agent-input-box"]')||box;
+      const sendBtn=currentBox?.querySelector('[data-testid="input-send-button"],[data-testid="send-button"],button[aria-label*="Send"],button[aria-label*="发送"]');
+      if(sendBtn&&!sendBtn.disabled){
+        sendBtn.click();
+      }else{
+        targetEditor.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+      }
+      await window.agPulseHost.taskAction?.({action:'reinvoke',conversationId:conversationId()});
+    }finally{
+      setTimeout(()=>{reinvoking=false;},1500);
     }
-    await new Promise(r=>setTimeout(r,140));
-    const currentBox=targetEditor.closest('[data-testid="agent-input-box"]')||box;
-    const sendBtn=currentBox?.querySelector('[data-testid="input-send-button"],[data-testid="send-button"],button[aria-label*="Send"],button[aria-label*="发送"]');
-    if(sendBtn&&!sendBtn.disabled){
-      sendBtn.click();
-    }else{
-      targetEditor.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-    }
-    await window.agPulseHost.taskAction?.({action:'reinvoke',conversationId:conversationId()});
   }
   function renderInlineChatCard(tp){
     if(!tp||composer?.kind==='subagent')return;
@@ -936,15 +1019,130 @@ module.exports = function installAgPulseInlineWidget() {
     text('tp-task-log',logSnippet);
     renderInlineChatCard(tp);
   }
+  function chooseGroup(groups,speed){
+    if(chosen&&groups.some(g=>g.id===chosen))return groups.find(g=>g.id===chosen);
+    const modelText=((composer?.model?.getAttribute('aria-label')||'')+' '+(composer?.model?.textContent||'')+' '+(speed?.model||'')).toLowerCase();
+    return groups.find(g=>/gemini/.test(modelText)?/gemini/i.test(g.id+' '+g.name):/claude|gpt|sonnet|opus|o1|o3/.test(modelText)?/3p|claude|gpt/i.test(g.id+' '+g.name):false)||groups[0]||null;
+  }
+  function renderQuotaWindow(winKey,prefix){
+    const bucket=group?.windows?.[winKey];
+    const remaining=bucket?.remaining;
+    text(`${prefix}-balance`,pct(remaining));
+    const fill=$(`${prefix}-fill`),track=$(`${prefix}-track`);
+    if(fill){
+      style(fill,'width',typeof remaining==='number'?`${Math.max(0,Math.min(1,remaining))*100}%`:'0%');
+      style(fill,'background',remaining!==null&&remaining<.05?'var(--pulse-danger)':remaining!==null&&remaining<.2?'var(--pulse-warning)':'');
+    }
+    if(track){
+      if(typeof remaining==='number'){attribute(track,'aria-valuenow',String(Math.round(remaining*100)));attribute(track,'aria-valuemin','0');attribute(track,'aria-valuemax','100');}
+      else attribute(track,'aria-valuenow',null);
+    }
+    text(`${prefix}-reset`,date(bucket?.resetAt));
+    text(`${prefix}-countdown`,timer(bucket?.resetAt));
+    text(`${prefix}-note`,!bucket?.available?t('noQuota'):bucket.disabled?t('disabledQuota'):remaining===null?t('noFraction'):`${t('sharedQuota')} ${t('quotaSource')}`);
+  }
+  function renderMetrics(){
+    const groups=data?.groups||[],speed=data?.speed||null;
+    group=chooseGroup(groups,speed);
+    text('group-trigger',group?label(group):t('unavailableQuota'));
+    const menu=$('group-menu');
+    const optionsKey=groups.map(g=>`${g.id}:${label(g)}:${group?.id===g.id}`).join('|');
+    if(menu&&menu.dataset.sig!==optionsKey){
+      menu.dataset.sig=optionsKey;
+      setMarkup(menu,groups.map(g=>`<button type="button" role="option" data-group-id="${escHtml(g.id)}" aria-selected="${String(group?.id===g.id)}">${escHtml(label(g))}</button>`).join(''));
+      for(const btn of menu.querySelectorAll('[data-group-id]')){
+        btn.addEventListener('click',(e)=>{
+          e.stopPropagation();
+          chosen=btn.dataset.groupId;localSet('ag-pulse-group',chosen);
+          closeGroup();render();
+        });
+      }
+    }
+    for(const el of root.querySelectorAll('.group-name'))el.textContent=group?label(group):'—';
+    renderQuotaWindow('5h','five');
+    renderQuotaWindow('weekly','week');
+
+    text('tps',rate(speed?.tps));
+    text('session-tps',rate(speed?.tps));
+    text('latest-tps',speed?.latestRateStatus==='unreliable'?t('timingUnreliable'):speed?.latestRateStatus==='legacy'?t('ratePending'):speed?.latestTps!=null?`${rate(speed.latestTps)} tok/s`:'—');
+    text('samples',speed?t('sample',{rounds:speed.rounds??0,steps:speed.steps??0,requests:speed.measuredRequests??0}):t('waitingRequest'));
+    text('model-time',seconds(speed?.modelSeconds));
+    text('tool-time',seconds(speed?.toolSeconds));
+    text('ttft',seconds(speed?.ttftSeconds));
+    text('tokens',speed?.counts?`${count(speed.counts.responseOutput)} / ${count(speed.counts.thinkingOutput)} tok`:'—');
+    const savedNote=speed?.restoredFromHistory?' '+t('savedStats',{time:speed.savedAt?date(speed.savedAt):'—'}):'';
+    const saveWarning=data?.persistenceError?' '+t('saveFailed'):'';
+    text('rate-note',speed?(language.rateNote(speed)+savedNote+saveWarning):t('newConversationStats'));
+
+    const taskUsage=Number.isSafeInteger(speed?.taskUsage?.subagents)&&speed.taskUsage.subagents>0?speed.taskUsage:null;
+    const usageSrc=taskUsage||speed,cache=usageSrc?.cache;
+    text('cache-rate',pct(cache?.hitRate));
+    text('cache-detail-rate',pct(cache?.hitRate));
+    const tokens=usageSrc?.tokens||cache;
+    const hasTotal=Boolean(tokens?.measuredRequests&&Number.isSafeInteger(tokens.totalTokens)&&tokens.totalTokens>=0);
+    text('cache-total',hasTotal?`${compact(tokens.totalTokens)} tok`:'');
+    text('cache-coverage',hasTotal?`${count(tokens.totalTokens)} tok`:'—');
+    const inputCov={uncachedTokens:'uncachedRequests',cachedTokens:'cachedRequests',cacheWriteTokens:'cacheWriteRequests'};
+    for(const [field,id] of [['cachedTokens','cache-read'],['uncachedTokens','cache-miss'],['cacheWriteTokens','cache-write'],['outputTokens','cache-output']]){
+      const avail=field==='outputTokens'?(tokens?.outputAvailable??(tokens?.outputRequests??tokens?.measuredRequests)):(tokens?.[inputCov[field]]??tokens?.inputRequests??tokens?.measuredRequests);
+      const known=Number.isSafeInteger(tokens?.[field])&&tokens[field]>=0;
+      text(id,avail&&known?`${count(tokens[field])} tok`:'—');
+    }
+    hidden($('cache-write-row'),!(tokens?.cacheWriteTokens>0));
+    hidden($('task-own-row'),!taskUsage);
+    hidden($('task-subagents-row'),!taskUsage);
+    text('task-subagents-label',taskUsage?t('taskSubagents',{n:count(taskUsage.subagents)}):'');
+    if(taskUsage){
+      text('task-own',Number.isSafeInteger(taskUsage.ownTokens)&&taskUsage.ownTokens>=0?`${count(taskUsage.ownTokens)} tok`:'—');
+      text('task-subagents',taskUsage.loadedSubagents>0&&Number.isSafeInteger(taskUsage.subagentTokens)&&taskUsage.subagentTokens>=0?`${count(taskUsage.subagentTokens)} tok`:'—');
+      const taskNote=taskUsage.state==='loading'?t('taskLoading'):taskUsage.state==='partial'?t('taskPartial'):'';
+      text('cache-note',taskNote);
+      hidden($('cache-note'),!taskNote);
+    }else{
+      hidden($('cache-note'),true);
+    }
+
+    if(data?.usage){
+      text('usage-today',compact(data.usage.todayTokens));
+      text('usage-month',compact(data.usage.monthTokens));
+      usageDashboard?.update(data.usage);
+    }else{
+      text('usage-today','—');
+      text('usage-month','—');
+      usageDashboard?.update(null);
+    }
+
+    const ctx=speed?.context,hasCap=typeof ctx?.usedFraction==='number';
+    const pctVal=hasCap?Math.round(ctx.usedFraction*100):null;
+    text('context-percent',pctVal!==null?`${pctVal}%`:'—');
+    style($('context-ring'),'--used-angle',hasCap?`${Math.min(1,Math.max(0,ctx.usedFraction))*360}deg`:'0deg');
+    text('context-summary',hasCap?t('contextUsed',{used:pctVal,remaining:Math.max(0,Math.round((ctx.remainingFraction??1-ctx.usedFraction)*100))}):t('contextUnknown'));
+    text('context-tokens',ctx?t('contextTokens',{used:compact(ctx.usedTokens),max:ctx.maxTokens===null?'—':compact(ctx.maxTokens)}):'—');
+    text('context-model',ctx?.model||speed?.model||'—');
+    style($('context-fill'),'width',hasCap?`${Math.min(1,Math.max(0,ctx.usedFraction))*100}%`:'0%');
+    style($('context-fill'),'background',hasCap&&ctx.usedFraction>=.9?'var(--pulse-danger)':'');
+  }
   function render(){
     if(!root||!data)return;
     syncConversation();
     attribute($('dot'),'class',`dot ${data.connection}`);
     attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));
+    renderMetrics();
     renderTaskProgress(data?.taskProgress);
     fit();position();
   }
   function tick(){
+    if(!root||!group)return;
+    const now=Date.now();
+    for(const [winKey,prefix] of [['5h','five'],['weekly','week']]){
+      const resetAt=group.windows?.[winKey]?.resetAt;
+      text(`${prefix}-countdown`,language.countdown(resetAt,now));
+      const ms=Date.parse(resetAt||'');
+      if(Number.isFinite(ms)&&ms<=now&&now-lastExpiredRefresh>15000){
+        lastExpiredRefresh=now;
+        void refresh(true);
+      }
+    }
   }
   function refreshBusy(busy){
     for(const button of root?.querySelectorAll('.refresh')||[]){

@@ -1,7 +1,7 @@
 // Incremental JSON projection for trajectory RPCs. Large prompts, tool results,
 // images and executor payloads are validated and skipped, never buffered.
 import {normalizeConversationId} from './delegation.mjs';
-const scalar='scalar',nonempty='nonempty',presence='presence',calls='calls',guid='conversationId';
+const scalar='scalar',nonempty='nonempty',presence='presence',calls='calls',guid='conversationId',tokenEstimate=Symbol('tokenEstimate');
 const usage=Object.fromEntries(['inputTokens','outputTokens','responseOutputTokens','thinkingOutputTokens','cacheReadTokens','cacheWriteTokens','apiProvider','responseId','messageId','model'].map(k=>[k,scalar]));
 const duration={seconds:scalar,nanos:scalar};
 const generators={'*':{stepIndices:{'*':scalar},chatModel:{usage,model:scalar,modelDisplayName:scalar,responseModel:scalar,
@@ -9,15 +9,17 @@ const generators={'*':{stepIndices:{'*':scalar},chatModel:{usage,model:scalar,mo
  chatStartMetadata:{createdAt:scalar,contextWindowMetadata:{estimatedTokensUsed:scalar,maxContextTokens:scalar}}}}};
 const subagentResult={conversationId:guid},subagentResults={'*':subagentResult};
 const invokeSubagent={conversationId:guid,results:subagentResults};
-const steps={'*':{type:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence},
- plannerResponse:{response:nonempty,toolCalls:calls},invokeSubagent}};
+const checkpointUsage={responseOutputTokens:scalar,outputTokens:scalar,model:scalar};
+const checkpoint={checkpointIndex:scalar,includedStepIndexStart:scalar,includedStepIndexEnd:scalar,sessionSummary:tokenEstimate};
+const steps={'*':{type:scalar,status:scalar,metadata:{createdAt:scalar,startedAt:scalar,completedAt:scalar,toolCall:presence,modelUsage:checkpointUsage},
+ plannerResponse:{response:nonempty,toolCalls:calls},checkpoint,invokeSubagent}};
 const trajectoryMetadata={parentConversationId:guid,rootConversationId:guid,nestingDepth:scalar};
 const summary={summary:scalar,stepCount:scalar,lastModifiedTime:scalar,status:scalar,lastUserInputStepIndex:scalar,
  hasActiveChildren:scalar,hasRunningSubagents:scalar,notFullyIdle:scalar,trajectoryMetadata};
 // Only this dictionary may project dynamic object keys. Ordinary object schemas
 // retain their exact-key allowlist; '*' remains an array selector everywhere else.
 const summaryEntry=Symbol('summaryEntry'),summaries={[summaryEntry]:summary};
-const objectOnly=new Set([subagentResult,invokeSubagent,trajectoryMetadata,summary,summaries]);
+const objectOnly=new Set([subagentResult,invokeSubagent,checkpointUsage,checkpoint,trajectoryMetadata,summary,summaries]);
 const arrayOnly=new Set([subagentResults]);
 const structured=node=>objectOnly.has(node)||arrayOnly.has(node);
 const stringAllowed=node=>node===scalar||typeof node==='object'&&!structured(node);
@@ -67,6 +69,9 @@ export class TrajectoryJson {
  }
  stringPart(text){
   const t=this.token;if(t.node===nonempty&&/\S/u.test(text)||t.node===presence&&text.length)t.any=true;
+  if(t.node===tokenEstimate){
+   const other=(text.match(/[^\x00-\x7f]/g)||[]).length;t.ascii+=text.length-other;t.other+=other;return;
+  }
   if(t.node==='textEstimate'){
    const other=(text.match(/[^\x00-\x7f]/g)||[]).length;t.ascii+=text.length-other;t.other+=other;
    if(t.buffer.length<256)t.buffer+=text.slice(0,256-t.buffer.length);
@@ -84,6 +89,7 @@ export class TrajectoryJson {
   if(t.key){const f=this.stack.at(-1);f.key=t.overflow?null:f.node===summaries?normalizeConversationId(t.buffer):t.buffer;f.expect='colon';return;}
   let value=DROP;
   if(t.node===nonempty)value=t.any?'1':'';
+  else if(t.node===tokenEstimate)value=Math.ceil(t.ascii/4+t.other/1.5);
   else if(t.node==='textEstimate')value={tokens:Math.ceil(t.ascii/4+t.other/1.5),prefix:t.buffer};
   else if(t.node===presence)value=t.any;
   else if(t.node===guid){const id=!t.overflow&&normalizeConversationId(t.buffer);if(id){value=id;this.charge(value.length*2);}}

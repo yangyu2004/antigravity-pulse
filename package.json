@@ -1,8 +1,8 @@
 {
-  "name": "antigrative-dashboard",
-  "version": "0.8.14",
+  "name": "antigravity-pulse",
+  "version": "0.9.1",
   "private": true,
-  "description": "Compact Antigravity token throughput and quota widget",
+  "description": "Claude-style inline step card, token throughput/cache/context & quota monitor, anti-stall monitor, and auto Chinese title renamer for Antigravity",
   "license": "MIT",
   "scripts": {
     "test": "node --test --test-timeout=60000 sidecars/panel/tests/*.test.mjs cli/tests/*.test.mjs",

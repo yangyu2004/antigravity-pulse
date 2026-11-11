@@ -7,6 +7,7 @@ import { contextMetrics, safeContext, formatModelName, modelContextReference, mo
 import { trajectoryMetrics } from '../metrics.mjs';
 import { SessionHistory, safeMetrics } from '../history.mjs';
 import { MetricsStore } from '../store.mjs';
+import { TrajectoryJson } from '../trajectory-json.mjs';
 
 const id='11111111-1111-1111-1111-111111111111',scope='a'.repeat(64);
 const raw=(used,max=256000,n=1)=>({trajectory:{cascadeId:id,generatorMetadata:Array.from({length:n},(_,i)=>({chatModel:{modelDisplayName:'Model A',usage:{messageId:String(i),inputTokens:'100',responseOutputTokens:'100',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'2s',chatStartMetadata:{contextWindowMetadata:{estimatedTokensUsed:used,maxContextTokens:max,tokenBreakdown:{prompt:'DO NOT SAVE'}}}}}))}});
@@ -131,4 +132,53 @@ test('provider reference and unknown threshold survive numeric history round tri
  await history.save(scope,id,trajectoryMetrics(response));const restored=(await history.load(scope,id)).metrics.context;
  assert.equal(restored.usedFraction,.5);assert.equal(restored.maxTokens,256000);assert.equal(restored.providerMaxTokens,1048576);assert.equal(restored.compressionLimit,null);
  const saved=JSON.parse(await readFile(history.file(scope,id),'utf8'));assert.equal(saved.metrics.context.providerCapacitySource,'https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash');
+});
+test('/compact checkpoint immediately lowers context occupancy before the next user message without leaking summary text',()=>{
+ const rawPayload={
+  trajectory:{
+   cascadeId:id,
+   steps:[
+    {type:'CORTEX_STEP_TYPE_USER_INPUT'},
+    {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'},
+    {type:'CORTEX_STEP_TYPE_USER_INPUT'},
+    {type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'},
+    {type:'CORTEX_STEP_TYPE_USER_INPUT'},
+    {
+     type:'CORTEX_STEP_TYPE_CHECKPOINT',
+     status:'CORTEX_STEP_STATUS_DONE',
+     metadata:{
+      createdAt:'2026-11-11T06:05:10Z',
+      completedAt:'2026-11-11T06:06:09Z',
+      modelUsage:{model:'MODEL_PLACEHOLDER_M427',outputTokens:'4244',responseOutputTokens:'4160'},
+     },
+     checkpoint:{
+      checkpointIndex:0,
+      includedStepIndexStart:0,
+      includedStepIndexEnd:5,
+      sessionSummary:'PRIVATE SUMMARY '.repeat(400),
+     },
+    },
+   ],
+   generatorMetadata:[
+    {stepIndices:[1],chatModel:{model:'MODEL_PLACEHOLDER_M427',modelDisplayName:'Gemini 4 Carbon (High)',usage:{messageId:'0',inputTokens:'14194',responseOutputTokens:'500',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'2s',chatStartMetadata:{contextWindowMetadata:{estimatedTokensUsed:19148,maxContextTokens:256000}}}},
+    {stepIndices:[3],chatModel:{model:'MODEL_PLACEHOLDER_M427',modelDisplayName:'Gemini 4 Carbon (High)',usage:{messageId:'1',inputTokens:'15483',cacheReadTokens:'232246',responseOutputTokens:'600',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'2s',chatStartMetadata:{contextWindowMetadata:{estimatedTokensUsed:251182,maxContextTokens:256000}}}},
+   ],
+  },
+ };
+ const parser=new TrajectoryJson();
+ parser.write(JSON.stringify(rawPayload));
+ const projected=parser.end();
+ assert.ok(!JSON.stringify(projected).includes('PRIVATE SUMMARY'));
+ const compacted=trajectoryMetrics(projected);
+ assert.equal(compacted.context.usedTokens,19148+4160);
+ assert.equal(Math.round(compacted.context.usedFraction*100),9);
+ assert.ok(compacted.context.usedFraction<0.15);
+
+ projected.trajectory.steps.push({type:'CORTEX_STEP_TYPE_USER_INPUT'},{type:'CORTEX_STEP_TYPE_PLANNER_RESPONSE'});
+ projected.trajectory.generatorMetadata.push({
+  stepIndices:[7],
+  chatModel:{model:'MODEL_PLACEHOLDER_M427',modelDisplayName:'Gemini 4 Carbon (High)',usage:{messageId:'2',inputTokens:'22630',responseOutputTokens:'422',apiProvider:'API_PROVIDER_GOOGLE_GEMINI'},streamingDuration:'2s',chatStartMetadata:{contextWindowMetadata:{estimatedTokensUsed:29628,maxContextTokens:256000}}},
+ });
+ const afterTurn=trajectoryMetrics(projected);
+ assert.equal(afterTurn.context.usedTokens,29628);
 });
