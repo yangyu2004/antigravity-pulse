@@ -26,7 +26,7 @@ BACKUPS = _paths['backups']
 RUNTIME_FILES = ('assets', 'compat', 'sidecars', 'hooks', 'hooks.json', 'rules', 'plugin.json')
 DIST_FILES = ('plugin.json', 'assets', 'sidecars', 'compat', 'hooks', 'hooks.json', 'rules', 'cli', 'ide', 'manage.py', 'install.ps1',
               'uninstall.ps1', 'install.sh', 'uninstall.sh', 'README.md', 'LICENSE', 'CHANGELOG.md', 'COMPATIBILITY.md', 'docs', 'package.json',
-              '.gitignore', '.gitattributes', '.github', 'tests', 'tools', 'GITHUB_RELEASE.md', 'README.zh-CN.md')
+              '.gitignore', '.gitattributes', 'tests', 'tools', 'GITHUB_RELEASE.md', 'README.zh-CN.md')
 IGNORED = {'__pycache__', '.data', 'node_modules', '.git', 'dist', 'data', 'history-v1', 'usage-v1', 'sdk'}
 
 def lifecycle_operation(function):
