@@ -28,10 +28,10 @@ class IdeTests(unittest.TestCase):
     def test_release_requires_four_consistent_assets_and_rejects_tampered_vsix(self):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Path(temporary)
-            package = json.loads((ROOT / 'plugin.json').read_text())
+            package = json.loads((ROOT / 'plugin.json').read_text(encoding='utf-8'))
             version = package['version']
             (fixture / 'ide').mkdir()
-            (fixture / 'plugin.json').write_text(json.dumps(package))
+            (fixture / 'plugin.json').write_text(json.dumps(package, ensure_ascii=False), encoding='utf-8')
             (fixture / 'ide/package.json').write_bytes((ROOT / 'ide/package.json').read_bytes())
             desktop_manager.package(fixture / 'dist' / f'antigrative-dashboard-{version}.zip')
             vsix = packager.build(fixture / 'dist' / f'antigrative-dashboard-ide-{version}.vsix')
@@ -49,14 +49,14 @@ class IdeTests(unittest.TestCase):
                     self.assertIn('extension/' + name, names)
                 self.assertIn('extension/README.md', names)
                 package = json.loads(archive.read('extension/package.json'))
-                self.assertEqual(package['version'], json.loads((ROOT / 'plugin.json').read_text())['version'])
+                self.assertEqual(package['version'], json.loads((ROOT / 'plugin.json').read_text(encoding='utf-8'))['version'])
                 self.assertEqual(package['extensionKind'], ['ui'])
                 manifest = ET.fromstring(archive.read('extension.vsixmanifest'))
                 identity = manifest.find('{*}Metadata/{*}Identity')
                 self.assertEqual(identity.get('Version'), package['version'])
                 ET.fromstring(archive.read('[Content_Types].xml'))
                 self.assertFalse(any('/history-v1/' in n or '/tests/' in n or n.endswith(('.log','.asar','.pyc')) for n in names))
-            self.assertEqual(output.with_suffix('.vsix.sha256').read_text().split(),
+            self.assertEqual(output.with_suffix('.vsix.sha256').read_text(encoding='utf-8').split(),
                              [hashlib.sha256(output.read_bytes()).hexdigest(), output.name])
 
     def test_missing_runtime_does_not_overwrite_existing_package(self):

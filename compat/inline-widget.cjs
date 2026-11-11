@@ -644,7 +644,7 @@ module.exports = function installAgPulseInlineWidget() {
       <button class="chip" type="button" data-card="speed" data-i18n-aria="session" aria-controls="speed-card" aria-expanded="false">${svg('speed')}<strong id="tps">—</strong><span class="dim">tok/s</span></button>
       <button class="chip" type="button" data-card="cache" data-i18n-aria="cache" aria-controls="cache-card" aria-expanded="false">${svg('cache')}<strong id="cache-rate">—</strong><span class="dim cache-total" id="cache-total"></span></button>
       <button class="chip" type="button" data-card="context" data-i18n-aria="context" aria-controls="context-card" aria-expanded="false"><span class="context-ring" id="context-ring" aria-hidden="true"></span><strong id="context-percent">—</strong><span class="dim context-label" data-i18n="contextShort"></span></button>
-      <button class="chip task-chip" type="button" data-card="task-progress" data-i18n-aria="taskProgress" id="task-chip" aria-controls="task-progress-card" aria-expanded="false"><span class="task-indicator" id="task-indicator">○</span><span class="task-percent-badge" id="task-percent-badge">0%</span><span class="task-title-snippet" id="task-title-snippet">项目进度</span></button>
+      <button class="chip task-chip" type="button" data-card="task-progress" data-i18n-aria="taskProgress" id="task-chip" aria-controls="task-progress-card" aria-expanded="false" hidden><span class="task-indicator" id="task-indicator">○</span><span class="task-percent-badge" id="task-percent-badge">0%</span><span class="task-title-snippet" id="task-title-snippet">项目进度</span></button>
     </div>
     <section class="card" id="speed-card" role="region" data-i18n-aria="session" hidden>
       <div class="heading"><span>${svg('speed')}<span data-i18n="session"></span></span><div class="toolbar"><span class="tag" id="samples">—</span><button type="button" class="refresh" data-i18n-aria="refreshStats" title="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 6a5.1 5.1 0 1 0 .1 4M12.8 2.5V6H9.2"/></svg></button></div></div>
@@ -939,26 +939,29 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function renderTaskProgress(tp){
     if(!root)return;
-    const isStalled=tp?.isStalled===true;
-    const status=tp?.status||'idle';
-    const percent=Number.isFinite(tp?.progressPercent)?tp.progressPercent:0;
     const chip=$('task-chip');
+    if(!tp){
+      if(chip)hidden(chip,true);
+      renderInlineChatCard(null);
+      return;
+    }
+    const isStalled=tp.isStalled===true;
+    const status=tp.status||'idle';
+    const isRunning=status==='running';
+    const percent=Number.isFinite(tp.progressPercent)?tp.progressPercent:0;
     if(chip){
-      chip.classList.toggle('stalled',isStalled);
-      chip.classList.toggle('running',status==='running');
-      const dot=$('task-indicator');
-      if(dot)dot.textContent=isStalled?'⚠️':(status==='completed'?'✓':(status==='running'?'●':'📋'));
+      hidden(chip,false);
+      if(chip.classList.contains('stalled')!==isStalled)chip.classList.toggle('stalled',isStalled);
+      if(chip.classList.contains('running')!==isRunning)chip.classList.toggle('running',isRunning);
+      text('task-indicator',isStalled?'⚠️':(status==='completed'?'✓':(isRunning?'●':'📋')));
       const badge=$('task-percent-badge');
       if(badge){
         const badgeStr=isStalled?`${tp.stalledDuration}s`:(status==='idle'&&percent===0?'':`${percent}%`);
-        badge.textContent=badgeStr;
+        text('task-percent-badge',badgeStr);
         hidden(badge,!badgeStr);
       }
-      const snippet=$('task-title-snippet');
-      if(snippet){
-        const cleanHead=tp?.headline?tp.headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹)\s*/u,'').replace(/^\[\d+\/\d+\]\s*/,''):'';
-        snippet.textContent=isStalled?t('taskStalled'):(cleanHead||t('taskProgress'));
-      }
+      const cleanHead=tp.headline?tp.headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹)\s*/u,'').replace(/^\[\d+\/\d+\]\s*/,''):'';
+      text('task-title-snippet',isStalled?t('taskStalled'):(cleanHead||t('taskProgress')));
     }
     text('tp-gauge-percent',`${percent}%`);
     const circumference=113.1;
@@ -970,30 +973,31 @@ module.exports = function installAgPulseInlineWidget() {
     }
     const badge=$('tp-status-badge');
     if(badge){
-      badge.className=`tp-badge ${isStalled?'stalled':status}`;
-      badge.textContent=isStalled?`● ${t('taskStalled')}`:(status==='running'?`● ${t('taskRunning')}`:(status==='completed'?`✓ ${t('taskCompleted')}`:`○ ${t('taskIdle')}`));
+      const nextCls=`tp-badge ${isStalled?'stalled':status}`;
+      if(badge.className!==nextCls)badge.className=nextCls;
+      text('tp-status-badge',isStalled?`● ${t('taskStalled')}`:(isRunning?`● ${t('taskRunning')}`:(status==='completed'?`✓ ${t('taskCompleted')}`:`○ ${t('taskIdle')}`)));
     }
-    const min=String(Math.floor((tp?.elapsedSeconds||0)/60)).padStart(2,'0');
-    const sec=String((tp?.elapsedSeconds||0)%60).padStart(2,'0');
+    const min=String(Math.floor((tp.elapsedSeconds||0)/60)).padStart(2,'0');
+    const sec=String((tp.elapsedSeconds||0)%60).padStart(2,'0');
     text('tp-elapsed',`${min}:${sec}`);
-    text('tp-headline',tp?.headline||t('taskNoSteps'));
+    text('tp-headline',tp.headline||t('taskNoSteps'));
     style($('tp-track-fill'),'width',`${percent}%`);
     style($('tp-track-fill'),'background',isStalled?'linear-gradient(90deg,#f59e0b,#ef4444)':(status==='completed'?'#10b981':''));
     const reinvokeBtn=$('tp-reinvoke-btn');
-    if(reinvokeBtn)reinvokeBtn.classList.toggle('stalled',isStalled);
+    if(reinvokeBtn&&reinvokeBtn.classList.contains('stalled')!==isStalled)reinvokeBtn.classList.toggle('stalled',isStalled);
     const stalledBanner=$('tp-stalled-banner');
     if(stalledBanner){
       hidden(stalledBanner,!isStalled);
       text('tp-stalled-text',isStalled?(tp.stalledReason||`当前任务可能处于卡顿状态（已持续 ${tp.stalledDuration||0} 秒）`):'');
     }
-    text('tp-objective',tp?.objective||'实时监控当前窗口项目进度，防止执行卡死');
-    text('tp-source-tag',`${t('taskDataSource')}: ${tp?.dataSource||'transcript.jsonl'}`);
+    text('tp-objective',tp.objective||'实时监控当前窗口项目进度，防止执行卡死');
+    text('tp-source-tag',`${t('taskDataSource')}: ${tp.dataSource||'transcript.jsonl'}`);
     const list=$('tp-steps-list');
-    if(list&&Array.isArray(tp?.steps)){
+    if(list&&Array.isArray(tp.steps)){
       const sig=JSON.stringify(tp.steps);
       if(list.dataset.sig!==sig){
         list.dataset.sig=sig;
-        list.innerHTML=tp.steps.map((s,idx)=>{
+        setMarkup(list,tp.steps.map((s,idx)=>{
           const stepStatus=s.status||'pending';
           let iconMarkup='<span class="tp-step-circle pending"></span>';
           let tagText='等待中';
@@ -1012,10 +1016,10 @@ module.exports = function installAgPulseInlineWidget() {
             `<div class="tp-step-content"><div class="tp-step-title">${escHtml(s.title)}</div></div>` +
             `<span class="tp-step-tag">${tagText}</span>` +
           `</div>`;
-        }).join('');
+        }).join(''));
       }
     }
-    const logSnippet=tp?.latestTask?.lastLine||(tp?.latestTask?`${tp.latestTask.name} (${tp.latestTask.elapsed}s)`:'实时监听 · 点击步骤可手动勾选');
+    const logSnippet=tp.latestTask?.lastLine||(tp.latestTask?`${tp.latestTask.name} (${tp.latestTask.elapsed}s)`:'实时监听 · 点击步骤可手动勾选');
     text('tp-task-log',logSnippet);
     renderInlineChatCard(tp);
   }

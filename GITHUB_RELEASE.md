@@ -1,28 +1,16 @@
-# Antigrative Dashboard v0.8.14
+# Antigravity Pulse v0.9.1
 
-Fix [#24](https://github.com/YOU-SHOULD-KNOW-ME/antigrative-dashboard/issues/24): a subagent opened in the App sidebar could display the main conversation's statistics even after the widget moved to the subagent input. Full View worked because it used a different conversation-owner layout.
+全功能增强状态栏、配额监控与 Claude 风格对话流进度面板插件，适配 **Google Antigravity**（macOS / Windows / Linux）。
 
-## Changes
+## 核心更新 (Highlights)
 
-- Resolve the sidebar conversation from its local message area and input. Support presentation wrappers without searching other panes or message contents. Speed, cache and context now follow the selected subagent; account quotas remain shared.
-- Refresh promptly when focus moves between inputs. Keep delayed parent responses from overwriting child statistics, and preserve correct selection through subagent switches, Full View and sidebar closure.
-- Fail closed when the local identity is missing, invalid, ambiguous or beyond the bounded DOM search budget. Do not substitute the main page's conversation ID.
-- Keep unresolved inline requests quota-only instead of enumerating and reading the latest conversation. Standalone dashboard SDK/HTTP default selection remains unchanged.
-- Bound both DOM traversal and its pending queue; skip transcript contents even for long conversations.
+- **对话气泡内嵌 Claude 风格步骤卡片**：在多步任务回复气泡内自动挂载实时步骤卡片（旋转圆弧进行中、虚线圆待执行、绿勾已完成，支持点击切换），并将工具调用与命令智能浓缩为简明中文目的描述。
+- **Token 吞吐率、缓存命中率、上下文占用与配额监控**：在输入框模型选择栏旁实时展示生成速率（`tok/s`）、缓存命中率、上下文窗口占用、5 小时 / 周配额详情及本机 Token 用量热力图，支持简/繁中文与英文一键切换。
+- **`/compact` 压缩后上下文占比即时回落 & 秒级手动刷新**：修复执行 `/compact` 后上下文占用卡在旧百分比的问题，完成压缩即刻更新为压缩后占比，手动点击「刷新」即时拉取最新摘要，并消除流式生成期间的短暂 `—` 闪烁。
+- **右下角进度胶囊与防卡死一键唤醒**：融合生命周期 Hooks、`transcript.jsonl`、`task_steps.json` 与输入框真实生成状态，回合结束立即归位不误报，卡死时支持一键 `⚡ 重新调起`。
+- **新建中文对话标题自动重命名**：后台自动检测新建中文对话并通过宿主本地 RPC 接口重命名为精炼中文标题（不覆盖历史或手动修改标题）。
 
-Existing statistics, settings and accounting rules are retained. The CLI behavior is unchanged. The shared widget's IDE path remains separate from App sidebar identity discovery.
+## 安装与升级 (Install / Update)
 
-## Install or update
-
-- **Antigravity App:** context details → **⋯ → Check for updates**, or extract `antigrative-dashboard-0.8.14.zip` and run `python manage.py install` (`python3` on Linux/macOS).
-- **Standalone Antigravity IDE:** install `antigrative-dashboard-ide-0.8.14.vsix` using **Install from VSIX…**.
-- Fully quit and reopen the corresponding host after updating. No statistics reset is needed.
-- If an older updater rejects a relocated `.gemini` junction before downloading, use the App ZIP for a one-time manual install. Keep the junction and saved data. Both packages include SHA-256 files.
-
-## Verification
-
-Local Node regression: **346 passed, 1 skipped**. English and Chinese sidebar browser fixtures use the production renderer and reproduce the original failure with the old source. They cover sibling/wrapped owners, focus changes, hidden/duplicate/invalid/missing owners, late responses, child switching, usage entry, Full View, initial loading and sidebar closure. Long-transcript and excessive-width/depth cases verify bounded ownership lookup. Existing Teamwork, subagent, widget-lifecycle and IDE browser regressions passed.
-
-Windows/Linux/macOS automated release gates and official App 2.28.2 resource checks run before publication. Synthetic browser fixtures do not establish acceptance in the reporter's original conversation or signed-in native GUIs on every platform. The separate general 2.28.x missing-widget report is not claimed fixed by this release.
-
-[Usage and subagent accounting](https://github.com/YOU-SHOULD-KNOW-ME/antigrative-dashboard/blob/v0.8.14/docs/USAGE.md) · [Compatibility](https://github.com/YOU-SHOULD-KNOW-ME/antigrative-dashboard/blob/v0.8.14/COMPATIBILITY.md)
+- **Antigravity 桌面端**：克隆仓库执行 `./install.sh`（Windows 执行 `.\install.ps1`），或解压 `antigrative-dashboard-0.9.1.zip` 后运行 `python3 manage.py install`。
+- **独立版 Antigravity IDE**：通过 **Install from VSIX…** 安装 `antigrative-dashboard-ide-0.9.1.vsix`。
