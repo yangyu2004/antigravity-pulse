@@ -246,3 +246,22 @@ test('an uncertain outcome after committing never reruns installation and a fres
  const checked=await fixture.service.check();assert.equal(checked.state,'current');assert.equal(checked.currentVersion,'0.8.7');assert.equal(applies,1);
  assert.deepEqual((await readdir(fixture.service.dataDir)).filter(name=>name.startsWith('plan-')),[]);
 });
+
+test('autoCheckAndApply installs available update automatically and waits until AI turn is idle before reloading',async t=>{
+ let busy=true,reloads=0,installed=false;
+ const fixture=await setup(t,async(_worker,args)=>{
+  if(args[0]==='check')return {host:'app',currentVersion:installed?'0.8.7':'0.8.6',latestVersion:'0.8.7',hasUpdate:!installed};
+  await writeFile(join(fixture.directory,'plugin.json'),JSON.stringify({name:'antigravity-pulse',version:'0.8.7'}));
+  installed=true;
+  return {version:'0.8.7',verified:true};
+ });
+ fixture.service.onReload=()=>{reloads++;};
+ await fixture.service.autoCheckAndApply({isEnabled:()=>true,isBusy:()=>busy,reloadDelayMs:30,idlePollMs:40,maxIdleWaitChecks:20});
+ assert.equal(fixture.service.publicState().state,'installed');
+ await new Promise(r=>setTimeout(r,100));
+ assert.equal(reloads,0,'Must not reload while AI turn is busy');
+ busy=false;
+ await new Promise(r=>setTimeout(r,450));
+ assert.equal(reloads,1,'Reloads automatically once AI turn becomes idle');
+ fixture.service.stopAutoUpdate();
+});

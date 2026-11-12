@@ -29,7 +29,9 @@ _lock_spec.loader.exec_module(_lock_module)
 lifecycle_lock, linked = _lock_module.lifecycle_lock, _lock_module.linked
 
 REPO = 'yangyu2004/antigravity-pulse'
-RUNTIME = ('assets', 'compat', 'sidecars', 'plugin.json')
+RUNTIME_DIRS = ('assets', 'compat', 'sidecars', 'hooks', 'rules')
+RUNTIME_ROOT_FILES = ('plugin.json', 'hooks.json')
+RUNTIME = ('assets', 'compat', 'sidecars', 'hooks', 'rules', 'hooks.json', 'plugin.json')
 class RollbackError(RuntimeError):
     pass
 
@@ -467,7 +469,7 @@ def file_inventory(value):
                 '\\' in name or ':' in name or any(p in ('.', '..') or p.lower() in PRIVATE or
                 p.rstrip(' .') != p or p.split('.')[0].upper() in reserved or
                 re.search(r'[\x00-\x1f<>"|?*]', p) for p in parts) or
-                not (name == 'plugin.json' or len(parts) > 1 and parts[0] in RUNTIME[:3])):
+                not (name in RUNTIME_ROOT_FILES or len(parts) > 1 and parts[0] in RUNTIME_DIRS)):
             raise ValueError('Invalid update file path')
         key = name.casefold()
         if key in seen:
@@ -713,7 +715,7 @@ def install_staged(stage, target, backup, current, expected, fault=None, progres
         return
     # Preserve old sidecar-local preferences/statistics if an older installer
     # stored them inside its runtime instead of the current external data root.
-    for name in RUNTIME[:3]:
+    for name in RUNTIME_DIRS:
         old = target / name
         if old.is_dir():
             for directory, dirs, _ in os.walk(old):

@@ -30,7 +30,7 @@ class UpdateWorkerTests(unittest.TestCase):
     def archive(self, extras=(), version='0.8.7'):
         path = self.home / 'fixture.zip'
         with zipfile.ZipFile(path, 'w') as bundle:
-            for name in worker.REQUIRED:
+            for name in (*worker.REQUIRED, 'hooks.json', 'hooks/lifecycle-hook.js', 'rules/AGENTS.md'):
                 content = json.dumps({'name': 'antigravity-pulse', 'version': version}) if name == 'plugin.json' else 'fixture source'
                 bundle.writestr('antigrative-dashboard/' + name, content)
             for name, content in extras:

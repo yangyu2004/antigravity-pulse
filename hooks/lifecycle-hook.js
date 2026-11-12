@@ -2,8 +2,30 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 
 const eventName = process.argv[2] || 'Unknown';
+const AUTO_UPDATE_INTERVAL_MS = 30 * 60 * 1000;
+
+function maybeSpawnBackgroundAutoUpdate() {
+  try {
+    const home = os.homedir();
+    const stampFile = path.join(home, '.gemini', 'antigravity', 'sidecar_data', 'antigravity-pulse', 'panel', 'data', 'updates', 'auto-check-stamp.json');
+    try {
+      const st = fs.statSync(stampFile);
+      if (Date.now() - st.mtimeMs < AUTO_UPDATE_INTERVAL_MS) return;
+    } catch {}
+    const updaterScript = path.join(__dirname, '..', 'compat', 'auto-updater.py');
+    if (!fs.existsSync(updaterScript)) return;
+    const pyBin = process.platform === 'win32' ? 'python' : 'python3';
+    const child = spawn(pyBin, [updaterScript], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    if (typeof child.unref === 'function') child.unref();
+  } catch {}
+}
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -71,6 +93,10 @@ async function main() {
       fs.writeFileSync(tmpFile, JSON.stringify(state), 'utf8');
       fs.renameSync(tmpFile, stateFile);
     } catch {}
+  }
+
+  if (eventName === 'Stop' && payload.fullyIdle !== false) {
+    maybeSpawnBackgroundAutoUpdate();
   }
 
   if (eventName === 'PreToolUse' || eventName === 'Stop') {

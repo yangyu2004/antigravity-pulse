@@ -107,8 +107,85 @@ def remove_verified_legacy_adapter():
         raise RuntimeError('The legacy adapter has unknown app changes; refusing to overwrite them. Inspect its backup first.')
 
 
+def install_auto_update_schedule():
+    """Register OS-level background auto-update task on real user installations."""
+    try:
+        if HOME.resolve() != Path.home().resolve():
+            return
+    except OSError:
+        return
+    updater_script = PLUGIN / 'compat' / 'auto-updater.py'
+    if not updater_script.is_file():
+        return
+    if sys.platform == 'darwin':
+        plist_dir = HOME / 'Library' / 'LaunchAgents'
+        plist_path = plist_dir / 'com.antigravity.pulse.autoupdate.plist'
+        plist_dir.mkdir(parents=True, exist_ok=True)
+        plist_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            '<dict>\n'
+            '  <key>Label</key>\n'
+            '  <string>com.antigravity.pulse.autoupdate</string>\n'
+            '  <key>ProgramArguments</key>\n'
+            '  <array>\n'
+            f'    <string>{sys.executable}</string>\n'
+            f'    <string>{updater_script}</string>\n'
+            '  </array>\n'
+            '  <key>RunAtLoad</key>\n'
+            '  <true/>\n'
+            '  <key>StartInterval</key>\n'
+            '  <integer>3600</integer>\n'
+            '  <key>StandardOutPath</key>\n'
+            '  <string>/dev/null</string>\n'
+            '  <key>StandardErrorPath</key>\n'
+            '  <string>/dev/null</string>\n'
+            '</dict>\n'
+            '</plist>\n'
+        )
+        plist_path.write_text(plist_xml, encoding='utf-8')
+        uid = os.getuid()
+        subprocess.run(['launchctl', 'bootout', f'gui/{uid}', str(plist_path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(['launchctl', 'bootstrap', f'gui/{uid}', str(plist_path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    elif sys.platform == 'win32':
+        pyw = Path(sys.executable).with_name('pythonw.exe')
+        runner = pyw if pyw.is_file() else Path(sys.executable)
+        subprocess.run(
+            ['schtasks', '/Create', '/F', '/SC', 'HOURLY', '/TN', 'AntigravityPulseAutoUpdate',
+             '/TR', f'"{runner}" "{updater_script}"'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        )
+
+
+def remove_auto_update_schedule():
+    try:
+        real_home = HOME.resolve() == Path.home().resolve()
+    except OSError:
+        real_home = False
+    if sys.platform == 'darwin':
+        plist_path = HOME / 'Library' / 'LaunchAgents' / 'com.antigravity.pulse.autoupdate.plist'
+        if real_home and plist_path.is_file():
+            subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}', str(plist_path)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if plist_path.is_file():
+            try:
+                plist_path.unlink()
+            except OSError:
+                pass
+    elif sys.platform == 'win32' and real_home:
+        subprocess.run(
+            ['schtasks', '/Delete', '/F', '/TN', 'AntigravityPulseAutoUpdate'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        )
+
+
 @lifecycle_operation
-def install(panel_only=False, legacy_loader=False):
+def install(panel_only=False, legacy_loader=False, auto_update=None):
     own_plugin()
     config = json_read(CONFIG)
     if not isinstance(config, dict) or not isinstance(config.get('plugins', {}), dict):
@@ -138,12 +215,20 @@ def install(panel_only=False, legacy_loader=False):
                        env={**os.environ, 'AG_PULSE_APP_ASAR': str(APP)})
     settings = json_read(SETTINGS)
     settings.update({'inline': not panel_only, 'mode': 'legacy' if legacy_loader else 'runtime'})
+    if auto_update is None:
+        settings.setdefault('autoUpdate', True)
+    else:
+        settings['autoUpdate'] = bool(auto_update)
     if APP.is_file():
         settings['appResources'] = str(APP.parent)
     if os.environ.get('AG_PULSE_PROFILE'):
         settings['profile'] = str(_paths['profile'])
     atomic_json(SETTINGS, settings)
     set_enabled(True)
+    if settings.get('autoUpdate', True):
+        install_auto_update_schedule()
+    else:
+        remove_auto_update_schedule()
     print('Installed:', PLUGIN)
     print('Fully quit and reopen Antigravity to start the plugin runtime. App updates no longer overwrite the inline adapter.')
 
@@ -166,6 +251,7 @@ def uninstall():
             preload = current[base + int(entry['offset']):base + int(entry['offset']) + entry['size']]
             if module.MARKER.encode() in preload:
                 raise RuntimeError('Application changed since patching. Inspect the backup before uninstalling.')
+    remove_auto_update_schedule()
     if PLUGIN.exists():
         set_enabled(False)
         resolved = PLUGIN.resolve()
@@ -181,9 +267,11 @@ def uninstall():
 def status():
     installed = (PLUGIN / 'plugin.json').is_file()
     enabled = installed and json_read(CONFIG).get('plugins', {}).get('antigravity-pulse', {}).get('enabled', True)
+    settings = json_read(SETTINGS)
     health_file = HOME / '.gemini' / 'antigravity' / 'sidecar_data' / 'antigravity-pulse' / 'panel' / 'data' / 'integration-state.json'
-    print(json.dumps({'installed': installed, 'enabled': bool(enabled), 'pluginDirectory': str(PLUGIN),
-                      'integrationMode': json_read(SETTINGS).get('mode', 'legacy'),
+    print(json.dumps({'installed': installed, 'enabled': bool(enabled), 'autoUpdate': settings.get('autoUpdate', True) is not False,
+                      'pluginDirectory': str(PLUGIN),
+                      'integrationMode': settings.get('mode', 'legacy'),
                       'inlineIntegration': json_read(health_file, None),
                       'toolbarAdapterRecoverable': APP.exists() and original_for_current(APP.read_bytes()) is not None}, indent=2))
 
@@ -216,7 +304,10 @@ def main():
     group.add_argument('--panel-only', action='store_true')
     group.add_argument('--legacy-loader', action='store_true', help='Opt in to the old, version-specific app.asar adapter')
     p.add_argument('--app-path', type=Path, help='Path to the desktop app resources/app.asar for a custom installation')
+    p.add_argument('--no-auto-update', action='store_true', help='Disable background automatic updates on install')
     for action in ('enable', 'disable', 'status', 'uninstall'): sub.add_parser(action)
+    p = sub.add_parser('auto-update', help='Check GitHub Releases and apply updates automatically')
+    p.add_argument('--force', action='store_true', help='Bypass interval throttle and check immediately')
     p = sub.add_parser('install-cli', help='Install the official CLI statusLine adapter independently of desktop')
     p.add_argument('--node', help='Node.js 20+ executable (defaults to PATH)')
     p.add_argument('--language', choices=('en', 'zh-CN', 'zh-TW'), help='Override shared desktop language choice')
@@ -229,12 +320,17 @@ def main():
         if args.action in ('install-cli', 'uninstall-cli', 'status-cli'):
             spec = importlib.util.spec_from_file_location('pulse_cli_lifecycle', SOURCE / 'cli' / 'lifecycle.py')
             cli = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cli)
-            if args.action == 'install-cli': cli.install(SOURCE, HOME, args.node, args.language)
-            elif args.action == 'uninstall-cli': cli.uninstall(HOME)
-            else: cli.status(HOME)
+            cli.install(SOURCE, HOME, args.node, args.language) if (spec.loader.exec_module(cli) or args.action == 'install-cli') else (cli.uninstall(HOME) if args.action == 'uninstall-cli' else cli.status(HOME))
             return 0
-        if args.action == 'install': install(args.panel_only, args.legacy_loader)
+        if args.action == 'auto-update':
+            updater_path = (PLUGIN / 'compat' / 'auto-updater.py') if (PLUGIN / 'compat' / 'auto-updater.py').is_file() else (SOURCE / 'compat' / 'auto-updater.py')
+            spec = importlib.util.spec_from_file_location('pulse_auto_updater', updater_path)
+            auto_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(auto_mod)
+            result = auto_mod.run_auto_update(home=HOME, target=PLUGIN, force=args.force)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result.get('status') != 'error' else 1
+        if args.action == 'install': install(args.panel_only, args.legacy_loader, auto_update=False if args.no_auto_update else None)
         elif args.action == 'enable': set_enabled(True)
         elif args.action == 'disable': set_enabled(False)
         elif args.action == 'uninstall': uninstall()

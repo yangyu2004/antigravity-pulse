@@ -6,11 +6,13 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const THINK_STALL_SEC = 180; // 高推理模型正常思考可达 60~120s，超过 180s 无任何响应才判疑似卡死
 const TOOL_STALL_SEC = 90;
 const MAX_INITIAL_READ_BYTES = 262144;
+// swarm_wait / wait_for_message 会阻塞到子代理在看板发消息，正常可等几十分钟；只有超过 30 分钟仍无回复才提示
+const BOARD_WAIT_STALL_SEC = 1800;
+const BOARD_WAIT_TOOLS = new Set(['swarm_wait', 'wait_for_message']);
 
 export class TaskMonitor {
   constructor(options = {}) {
     this.brainRoot = options.brainRoot || join(homedir(), '.gemini', 'antigravity', 'brain');
-    this.customSteps = new Map();
     this.transcriptCache = new Map();
   }
 
@@ -168,6 +170,7 @@ export class TaskMonitor {
     );
     const silenceSec = lastActivityMs > 0 ? Math.max(0, Math.round((now - lastActivityMs) / 1000)) : 0;
     const mainWaitingOnSubagents = hasRunningSubagents && (!lsRunning || lifecycleEvent === 'Stop' || tState.lastStepFinished);
+    const waitingOnBoard = !pendingNewUserTurn && tState.waitingOnBoard === true;
 
     let status = 'idle';
     let isStalled = false;
@@ -175,20 +178,27 @@ export class TaskMonitor {
     let headline = '待命';
 
     if (inActiveTurn) {
-      const threshold = (lifecycleEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
+      const threshold = waitingOnBoard
+        ? BOARD_WAIT_STALL_SEC
+        : (lifecycleEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
       const hasSubagentTelemetry = subagentActivityMs > 0 || (cascadeState?.runningSubagentIds?.length || 0) > 0;
       const canMeasureStall = !mainWaitingOnSubagents || hasSubagentTelemetry;
       if (canMeasureStall && silenceSec >= threshold) {
         isStalled = true;
         status = 'stalled';
-        stalledReason = mainWaitingOnSubagents
+        stalledReason = waitingOnBoard
+          ? `等待子代理看板消息已连续 ${silenceSec} 秒无回复`
+          : mainWaitingOnSubagents
           ? `运行中的 ${runningSubagentCount} 个子代理已连续 ${silenceSec} 秒无新响应`
           : lifecycleEvent === 'PreToolUse'
             ? `工具 [${hookToolName || 'tool'}] 已连续 ${silenceSec} 秒无响应`
             : hasBgTaskRunning
               ? `后台任务 [${latestTask?.name || 'task'}] 已连续 ${silenceSec} 秒无输出`
               : `模型思考已连续 ${silenceSec} 秒无新响应`;
-        headline = mainWaitingOnSubagents ? `⚠️ 子代理疑似卡住 (${silenceSec}s)` : `⚠️ 疑似卡住 (${silenceSec}s)`;
+        headline = (mainWaitingOnSubagents || waitingOnBoard) ? `⚠️ 子代理疑似卡住 (${silenceSec}s)` : `⚠️ 疑似卡住 (${silenceSec}s)`;
+      } else if (waitingOnBoard && !hasRunningSubagents) {
+        status = 'running';
+        headline = `⏳ 等待子代理看板消息 (${silenceSec}s)`;
       } else if (mainWaitingOnSubagents) {
         status = 'running';
         headline = subagentProbe.latestAction
@@ -228,15 +238,11 @@ export class TaskMonitor {
       }
     }
 
-    // 7. 组装步骤清单（优先级：用户手动点击 > scratch/task_steps.json > 模型计划列表 > 真实工具执行时间线）
-    const custom = pendingNewUserTurn ? null : this.customSteps.get(id);
+    // 7. 组装步骤清单（只读，100% 由 AI 实时运行驱动：scratch/task_steps.json > 模型计划列表 > 真实工具执行时间线）
     let baseSteps = [];
     let hasRealSteps = false;
 
-    if (custom && custom.length > 0) {
-      baseSteps = custom.map(s => ({ ...s }));
-      hasRealSteps = true;
-    } else if (filePlan?.steps?.length >= 2) {
+    if (filePlan?.steps?.length >= 2) {
       baseSteps = filePlan.steps.slice(0, 8).map((s, i) => ({
         id: s.id || i + 1,
         title: this.cleanStepTitle(s.title) || `步骤 ${i + 1}`,
@@ -300,7 +306,7 @@ export class TaskMonitor {
     }
 
     // 关键不变量：只要本轮仍在运行（含子代理运行中），步骤列表绝不能全部渲染为 completed
-    if (inActiveTurn && !custom && baseSteps.length > 0) {
+    if (inActiveTurn && baseSteps.length > 0) {
       const hasActiveStep = baseSteps.some(s => s.status === 'running' || s.status === 'stalled');
       if (!hasActiveStep) {
         const firstPendingIdx = baseSteps.findIndex(s => s.status !== 'completed');
@@ -355,7 +361,7 @@ export class TaskMonitor {
     } else if (steps.length > 0) {
       progressPercent = Math.round(((completedCount + activeCount * 0.5) / steps.length) * 100);
       if (completedCount === steps.length) progressPercent = 100;
-      if (!turnFinished && !custom && progressPercent >= 100) progressPercent = 95;
+      if (!turnFinished && progressPercent >= 100) progressPercent = 95;
     }
 
     // 9. 本轮真实耗时（结束即冻结；若子代理仍在运行则持续计时）
@@ -552,7 +558,7 @@ export class TaskMonitor {
     if (name === 'send_message') return '向子代理发送协作消息';
     if (name === 'read_board') return '读取子代理协作看板消息';
     if (name === 'post_message') return '同步结论至子代理协作看板';
-    if (name === 'wait_for_message') return '等待子代理看板消息回调';
+    if (name === 'wait_for_message' || name === 'swarm_wait') return '等待子代理看板消息回调';
     if (name === 'manage_task') return '检查后台任务执行状态';
     if (name === 'schedule') return '配置定时监控任务';
     if (name === 'search_web') {
@@ -601,7 +607,8 @@ export class TaskMonitor {
         turnEndMs: 0,
         prevTurnEndMs: 0,
         lastErrorMs: 0,
-        lastStepFinished: true
+        lastStepFinished: true,
+        waitingOnBoard: false
       };
     }
 
@@ -614,6 +621,7 @@ export class TaskMonitor {
         cache.turnToolSteps = [];
         cache.planStepIdx = -1;
         cache.modelStepsAfterPlan = 0;
+        cache.waitingOnBoard = false;
       }
 
       if (st.size > cache.lastSize) {
@@ -676,11 +684,11 @@ export class TaskMonitor {
             cache.turnEndMs = 0;
             cache.lastErrorMs = 0;
             cache.lastStepFinished = false;
+            cache.waitingOnBoard = false;
             cache.steps = [];
             cache.turnToolSteps = [];
             cache.planStepIdx = -1;
             cache.modelStepsAfterPlan = 0;
-            this.customSteps.delete(conversationId);
             const userGoal = this.extractUserRequest(step.content);
             if (userGoal) {
               cache.lastUserInputGoal = userGoal;
@@ -694,6 +702,7 @@ export class TaskMonitor {
 
         // 子代理（Subagent / Swarm Worker）的首条输入往往是 SYSTEM_MESSAGE 或非 USER_EXPLICIT 的 USER_INPUT；同时主会话收到子代理回调 SYSTEM_MESSAGE 时代表本轮重新唤醒继续推进
         if (step.type === 'SYSTEM_MESSAGE' || (step.type === 'USER_INPUT' && step.source !== 'USER_EXPLICIT')) {
+          cache.waitingOnBoard = false;
           if (cache.turnStepIdx === -1 && stepIdx >= 0) {
             cache.turnStepIdx = stepIdx;
             cache.turnStartMs = stepTs || now;
@@ -713,6 +722,7 @@ export class TaskMonitor {
         if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE') {
           const toolCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
           const hasTools = toolCalls.length > 0;
+          cache.waitingOnBoard = toolCalls.some(tc => BOARD_WAIT_TOOLS.has(tc?.name));
 
           if (!hasTools && step.status === 'DONE') {
             cache.lastStepFinished = true;
@@ -873,35 +883,6 @@ export class TaskMonitor {
       ],
       latestTask: null
     };
-  }
-
-  toggleStep(conversationId, stepId) {
-    if (!conversationId) return;
-    const id = conversationId.toLowerCase();
-    let steps = this.customSteps.get(id);
-    if (!steps) {
-      const cache = this.transcriptCache.get(id);
-      const source = cache?.steps?.length ? cache.steps : cache?.turnToolSteps?.map((title, i) => ({ id: i + 1, title, status: 'completed', percent: 100 }));
-      if (!source || !source.length) return;
-      steps = source.map(s => ({ ...s }));
-      this.customSteps.set(id, steps);
-    }
-    const item = steps.find(s => s.id === Number(stepId));
-    if (item) {
-      if (item.status === 'completed') {
-        item.status = 'pending';
-        item.percent = 0;
-      } else {
-        item.status = 'completed';
-        item.percent = 100;
-      }
-    }
-  }
-
-  setSteps(conversationId, steps) {
-    if (conversationId && Array.isArray(steps)) {
-      this.customSteps.set(conversationId.toLowerCase(), steps);
-    }
   }
 
   async reinvoke(conversationId) {

@@ -1,4 +1,4 @@
-// Manual updates only. Public release metadata is fetched by the bounded
+// Supports both background automatic updates and manual updates via the bounded
 // Python worker, which uses the user's existing proxy configuration.
 import {readFile,mkdir,writeFile,unlink} from 'node:fs/promises';
 import {join,dirname,resolve,win32} from 'node:path';
@@ -17,7 +17,7 @@ const updateError=(code,detail)=>Object.assign(Error(code),{detail:safeDetail(de
 export function releaseRuntimeDirectory(pluginDir,{platform=process.platform,cwd=()=>process.cwd(),chdir=dir=>process.chdir(dir)}={}){
  if(platform!=='win32')return false;
  const root=win32.resolve(pluginDir),current=win32.resolve(cwd());
- for(const name of ['assets','compat','sidecars']){
+ for(const name of ['assets','compat','sidecars','hooks','rules']){
   const relative=win32.relative(win32.join(root,name),current);
   if(relative===''||relative!=='..'&&!relative.startsWith('..\\')&&!win32.isAbsolute(relative)){chdir(root);return true;}
  }
@@ -90,6 +90,7 @@ export class AppUpdater{
   this.pluginDir=resolve(pluginDir);this.dataDir=join(resolve(dataDir),'updates');this.worker=resolve(worker);this.run=run;this.onReload=onReload;this.now=now;
  }
  state={state:'idle',host:'app',currentVersion:null};plan=null;checkPending=null;applyPending=null;job=null;lastCheck=0;
+ autoBootTimer=null;autoIntervalTimer=null;reloadWaitTimer=null;autoCyclePending=null;autoStopped=false;
  publicState(){const {state,host,currentVersion,latestVersion,notes,error,errorDetail,progress}=this.state;return {state,host,currentVersion,latestVersion,notes,error,errorDetail,progress};}
  async current(){const m=JSON.parse(await readFile(join(this.pluginDir,'plugin.json'),'utf8'));if(m.name!=='antigravity-pulse'||!/^\d+\.\d+\.\d+$/.test(m.version))throw Error('verification');return m.version;}
  async check(){
@@ -151,5 +152,59 @@ export class AppUpdater{
   if(input.action==='reload'&&input.version===undefined&&this.state.state==='reloading')return this.publicState();
   if(input.action==='reload'&&input.version===undefined&&this.state.state==='installed'&&this.onReload){this.state={...this.state,state:'reloading'};setTimeout(()=>this.onReload(),500);return this.publicState();}
   throw Error('verification');
+ }
+ async autoCheckAndApply({isEnabled=()=>true,isBusy=async()=>false,reloadDelayMs=1500,idlePollMs=5000,maxIdleWaitChecks=60}={}){
+  if(this.autoStopped||!isEnabled())return this.publicState();
+  if(this.autoCyclePending)return this.autoCyclePending;
+  if(this.job||this.applyPending||['installing','installed','reloading'].includes(this.state.state))return this.publicState();
+  this.autoCyclePending=(async()=>{
+   try{
+    const checked=await this.check();
+    if(this.autoStopped||!isEnabled()||checked.state!=='available'||!checked.latestVersion)return this.publicState();
+    await this.apply(checked.latestVersion);
+    if(this.job)await this.job;
+    if(this.autoStopped||this.state.state!=='installed'||!this.onReload)return this.publicState();
+    this.scheduleIdleReload({isEnabled,isBusy,delayMs:reloadDelayMs,idlePollMs,maxChecks:maxIdleWaitChecks});
+   }catch{}
+   return this.publicState();
+  })().finally(()=>{this.autoCyclePending=null;});
+  return this.autoCyclePending;
+ }
+ scheduleIdleReload({isEnabled=()=>true,isBusy=async()=>false,delayMs=1500,idlePollMs=5000,maxChecks=60}={}){
+  clearTimeout(this.reloadWaitTimer);
+  let checks=0;
+  const poll=async()=>{
+   if(this.autoStopped||this.state.state!=='installed'||!this.onReload||!isEnabled())return;
+   let busy=false;
+   try{busy=Boolean(await isBusy());}catch{}
+   if(busy&&checks<maxChecks){
+    checks++;
+    this.reloadWaitTimer=setTimeout(()=>void poll(),idlePollMs);
+    this.reloadWaitTimer.unref?.();
+    return;
+   }
+   if(this.state.state==='installed'&&this.onReload){
+    this.state={...this.state,state:'reloading'};
+    const t=setTimeout(()=>this.onReload(),300);
+    t.unref?.();
+   }
+  };
+  this.reloadWaitTimer=setTimeout(()=>void poll(),delayMs);
+  this.reloadWaitTimer.unref?.();
+ }
+ startAutoUpdate({initialDelayMs=8000,intervalMs=30*60*1000,reloadDelayMs=1500,idlePollMs=5000,maxIdleWaitChecks=60,isEnabled=()=>true,isBusy=async()=>false}={}){
+  this.stopAutoUpdate();
+  this.autoStopped=false;
+  const run=()=>void this.autoCheckAndApply({isEnabled,isBusy,reloadDelayMs,idlePollMs,maxIdleWaitChecks});
+  this.autoBootTimer=setTimeout(run,initialDelayMs);
+  this.autoBootTimer.unref?.();
+  this.autoIntervalTimer=setInterval(run,intervalMs);
+  this.autoIntervalTimer.unref?.();
+ }
+ stopAutoUpdate(){
+  this.autoStopped=true;
+  clearTimeout(this.autoBootTimer);this.autoBootTimer=null;
+  clearInterval(this.autoIntervalTimer);this.autoIntervalTimer=null;
+  clearTimeout(this.reloadWaitTimer);this.reloadWaitTimer=null;
  }
 }

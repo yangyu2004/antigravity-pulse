@@ -5,6 +5,9 @@ import { homedir } from 'node:os';
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HAN_RE = /\p{Script=Han}/u;
 const HEAD_READ_BYTES = 49152;
+const MAX_TITLE_CHARS = 18;
+// 宿主有时把首条提问原样塞进标题，超过这个长度且与提问开头一致时视为原文堆砌
+const RAW_TITLE_MIN_CHARS = 24;
 
 export class TitleRenamer {
   constructor({ client, dataDir, brainRoot = join(homedir(), '.gemini', 'antigravity', 'brain') }) {
@@ -85,12 +88,21 @@ export class TitleRenamer {
       if (!GUID.test(rawId)) continue;
       const id = rawId.toLowerCase();
       const record = state.renamed[id];
-      if (record?.locked) continue;
-
       const currentTitle = String(meta?.summary || '').trim();
+      if (record?.locked) {
+        // 旧版本把宿主写入的整段提问原样锁定了；只修这种原文堆砌标题，用户手动起的短标题不动
+        if (!record.skippedHistorical && !record.compacted && record.title && await this.isRawPromptTitle(id, currentTitle || record.title)) {
+          if (await this.compactRawTitle(id, currentTitle || record.title, state, now)) dirty = true;
+        }
+        continue;
+      }
       if (!currentTitle || currentTitle === '未命名会话' || /^new conversation$/i.test(currentTitle)) continue;
 
       if (HAN_RE.test(currentTitle) && !record?.provisional) {
+        if (await this.isRawPromptTitle(id, currentTitle)) {
+          if (await this.compactRawTitle(id, currentTitle, state, now)) dirty = true;
+          continue;
+        }
         state.renamed[id] = { title: currentTitle, locked: true, updatedAt: now };
         dirty = true;
         continue;
@@ -108,6 +120,32 @@ export class TitleRenamer {
     }
 
     if (dirty) await this.saveState();
+  }
+
+  async isRawPromptTitle(id, title) {
+    const chars = Array.from(String(title || '').trim());
+    if (chars.length < RAW_TITLE_MIN_CHARS) return false;
+    const info = await this.readFirstPrompts(join(this.brainRoot, id, '.system_generated', 'logs', 'transcript.jsonl'));
+    const first = info?.userPrompts?.[0];
+    if (!first) return false;
+    const norm = v => String(v).replace(/[\s，,]+/g, '');
+    const head = norm(chars.slice(0, RAW_TITLE_MIN_CHARS).join(''));
+    return norm(first).startsWith(head.slice(0, Math.min(head.length, 16)));
+  }
+
+  async compactRawTitle(id, rawTitle, state, now) {
+    const derived = this.summarizeToTitle(rawTitle);
+    if (!derived || derived === rawTitle) {
+      state.renamed[id] = { ...(state.renamed[id] || {}), title: rawTitle, locked: true, compacted: true, updatedAt: now };
+      return true;
+    }
+    await this.client.call('UpdateConversationAnnotations', {
+      cascadeId: id,
+      annotations: { title: derived },
+      mergeAnnotations: true
+    });
+    state.renamed[id] = { title: derived, locked: true, compacted: true, updatedAt: now };
+    return true;
   }
 
   async renameIfChineseConversation(id, provisional, state, now) {
@@ -213,13 +251,13 @@ export class TitleRenamer {
       .trim();
 
     const clauses = text
-      .split(/[，,。！？!?；;\n]+/)
+      .split(/[，,。！？!?；;：:❯\n]+/)
       .map(c => this.cleanClause(c))
       .filter(c => c.length >= 4 && HAN_RE.test(c));
 
     if (!clauses.length) {
       const single = this.cleanClause(text);
-      return single.length >= 3 ? this.capTitle(single, 18) : '';
+      return single.length >= 3 ? this.capTitle(single, MAX_TITLE_CHARS) : '';
     }
 
     const intentRe = /(实现|修复|优化|排查|解决|配置|添加|新增|支持|重命名|自动|同步|部署|生成|搭建|重构|分析|设计|改|写)/;
@@ -227,12 +265,12 @@ export class TitleRenamer {
       ? clauses[1]
       : clauses[0];
 
-    return this.capTitle(chosen, 18);
+    return this.capTitle(chosen, MAX_TITLE_CHARS);
   }
 
   cleanClause(clause) {
     let s = String(clause || '').trim();
-    const prefixRe = /^(?:请问一下|请问|你好|嗨|麻烦你|麻烦|请帮我|帮我看一下|帮我看看|帮我把|帮我|我想问一下|想问下|有个问题|还有一个问题是|然后还有一个问题是|顺便问一下|另外|就是说|我现在想|我想知道|我该如何让它|该如何让它|如何让它|怎么让它|我该如何|该如何|如何才能|怎么才能|能够|能不能帮我|能不能|可不可以|是否可以|你在这个|在这个|这篇|这个|把)\s*/u;
+    const prefixRe = /^(?:你来看看|你看看|看看|你来|请问一下|请问|你好|嗨|麻烦你|麻烦|请帮我|帮我看一下|帮我看看|帮我把|帮我|我想问一下|想问下|有个问题|还有一个问题是|然后还有一个问题是|顺便问一下|另外|就是说|我现在想|我想知道|我该如何让它|该如何让它|如何让它|怎么让它|我该如何|该如何|如何才能|怎么才能|能够|能不能帮我|能不能|可不可以|是否可以|你在这个|在这个|这篇|这个|把)\s*/u;
     for (let i = 0; i < 4; i++) {
       const next = s.replace(prefixRe, '').trim();
       if (next === s) break;
@@ -244,9 +282,15 @@ export class TitleRenamer {
       .trim();
   }
 
-  capTitle(str, maxChars = 18) {
+  capTitle(str, maxChars = MAX_TITLE_CHARS) {
     const chars = Array.from(str.trim());
     if (chars.length <= maxChars) return chars.join('');
-    return chars.slice(0, maxChars).join('').replace(/[的与和及并或、\s]+$/u, '');
+    let cut = chars.slice(0, maxChars).join('');
+    // 截断点落在英文单词中间时，退回到单词开头，避免出现 "clau" 这类残词
+    if (/[A-Za-z0-9]/.test(chars[maxChars - 1] || '') && /[A-Za-z0-9]/.test(chars[maxChars] || '')) {
+      const trimmed = cut.replace(/[A-Za-z0-9._-]+$/, '');
+      if (Array.from(trimmed.trim()).length >= 4) cut = trimmed;
+    }
+    return cut.replace(/[的与和及并或、\s]+$/u, '').trim();
   }
 }

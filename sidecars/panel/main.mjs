@@ -33,6 +33,7 @@ const preferences=new PreferencesStore();
 const taskMonitor=new TaskMonitor();
 const titleRenamer=new TitleRenamer({client:store.client,dataDir:paths.data});
 const updater=new AppUpdater({pluginDir:join(HERE,'..','..'),dataDir:paths.data});
+let activeTurnAt=0;
 const metrics = async input => {
   if(ownership&&!await ownership.isOwner())throw Error('Sidecar ownership changed');
   const s=runtimeSettings();
@@ -44,6 +45,7 @@ const metrics = async input => {
     domRunningSubagents:input?.domRunningSubagents,
     cascadeState,
   });
+  if(taskProgress?.status==='running'||taskProgress?.status==='stalled')activeTurnAt=Date.now();
   return {...base,taskProgress,usage:await usage.snapshot({sync:input?.usageSync===true}),preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health};
 };
 const usageSource=()=>{const s=readFileSync(join(HERE,'..','..','compat','usage-ui.cjs'),'utf8');return `window.__agPulseUsageFactory=(${s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'')});`;};
@@ -74,8 +76,6 @@ const integration = new RuntimeUi({
   taskAction: async input => {
     if (!input || typeof input !== 'object') return { ok: false };
     if (input.action === 'reinvoke') return await taskMonitor.reinvoke(input.conversationId);
-    if (input.action === 'toggle-step') { taskMonitor.toggleStep(input.conversationId, input.stepId); return { ok: true }; }
-    if (input.action === 'set-steps') { taskMonitor.setSteps(input.conversationId, input.steps); return { ok: true }; }
     return { ok: false };
   },
   owner:ownership?.token,owns:()=>ownership?ownership.isOwner():true,
@@ -100,12 +100,17 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.run();
   integration.start();
   const shutdown=async()=>{
+    updater.stopAutoUpdate?.();
     usage.dispose();store.dispose();
     const exitTimer=setTimeout(()=>process.exit(0),2000);exitTimer.unref();
     await integration.stop();ownership.stop();process.exit(0);
   };
   ownership.watch(shutdown);
   updater.onReload=()=>void shutdown();
+  updater.startAutoUpdate?.({
+    isEnabled:()=>{const s=runtimeSettings();return s.enabled!==false&&s.autoUpdate!==false;},
+    isBusy:()=>Date.now()-activeTurnAt<6000,
+  });
   for (const signal of ['SIGTERM','SIGINT']) process.once(signal, () => {
     void shutdown();
   });

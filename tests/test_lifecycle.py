@@ -135,4 +135,26 @@ class LifecycleTests(unittest.TestCase):
         with zipfile.ZipFile(output) as bundle:
             self.assertEqual(set(bundle.namelist()), {'antigrative-dashboard/plugin.json', 'antigrative-dashboard/sidecars/panel/main.mjs'})
 
+    def test_auto_updater_respects_throttle_and_applies_available_release(self):
+        auto_spec = importlib.util.spec_from_file_location('pulse_auto_updater', ROOT / 'compat' / 'auto-updater.py')
+        auto_mod = importlib.util.module_from_spec(auto_spec)
+        auto_spec.loader.exec_module(auto_mod)
+        manager.install(panel_only=True)
+        self.assertTrue(manager.json_read(self.settings).get('autoUpdate'))
+        calls = []
+        def fake_worker(_worker, args, _cwd, _timeout):
+            calls.append(args[0])
+            if args[0] == 'check':
+                return {'host': 'app', 'currentVersion': '0.9.2', 'latestVersion': '0.9.3', 'hasUpdate': True, 'url': 'https://example.test/a.zip'}
+            return {'version': '0.9.3', 'verified': True}
+        with patch.object(auto_mod, 'load_paths', return_value={'home': self.home, 'settings': self.settings}), \
+             patch.object(auto_mod, 'reload_idle_sidecar', return_value=True):
+            res1 = auto_mod.run_auto_update(home=self.home, target=self.plugin, worker_runner=fake_worker)
+            self.assertEqual(res1['status'], 'updated')
+            self.assertEqual(res1['version'], '0.9.3')
+            self.assertEqual(calls, ['check', 'apply'])
+            res2 = auto_mod.run_auto_update(home=self.home, target=self.plugin, worker_runner=fake_worker)
+            self.assertEqual(res2['status'], 'throttled')
+            self.assertEqual(calls, ['check', 'apply'])
+
 if __name__ == '__main__': unittest.main()

@@ -630,8 +630,7 @@ module.exports = function installAgPulseInlineWidget() {
     .tp-section-title{font-size:10.5px;font-weight:600;color:var(--pulse-label);}
     .tp-source-tag{font-size:9px;color:var(--pulse-muted);font-variant-numeric:tabular-nums;}
     .tp-steps-list{display:flex;flex-direction:column;gap:4px;max-height:175px;overflow-y:auto;padding-right:2px;}
-    .tp-step-item{display:flex;align-items:flex-start;gap:7px;padding:5px 7px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid transparent;font-size:10.5px;cursor:pointer;user-select:none;}
-    .tp-step-item:hover{background:var(--pulse-hover);border-color:var(--pulse-separator);}
+    .tp-step-item{display:flex;align-items:flex-start;gap:7px;padding:5px 7px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid transparent;font-size:10.5px;cursor:default;user-select:none;pointer-events:none;}
     .tp-step-item.running{background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.25);}
     .tp-step-item.stalled{background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.3);}
     .tp-step-item.completed{opacity:.85;}
@@ -773,26 +772,9 @@ module.exports = function installAgPulseInlineWidget() {
     themeController=theme.attach(node,{embedded:true});
     report('mounted',{editorFound:true,composerFound:true});
     observeComposer();
-    $('tp-reinvoke-btn')?.addEventListener('click',async(e)=>{
-      e.stopPropagation();
-      const btn=$('tp-reinvoke-btn');btn.textContent='调起中…';btn.disabled=true;
-      try{
-        await reinvokeHost();
-        btn.textContent='✓ 已唤醒';setTimeout(()=>{btn.textContent='⚡ 重新调起';btn.disabled=false;},2000);refresh(true);
-      }catch{btn.textContent='调起失败';setTimeout(()=>{btn.textContent='⚡ 重新调起';btn.disabled=false;},2000);}
-    });
+    $('tp-reinvoke-btn')?.addEventListener('click',e=>{e.stopPropagation();void onReinvokeClick($('tp-reinvoke-btn'));});
     $('tp-refresh-btn')?.addEventListener('click',(e)=>{e.stopPropagation();refresh(true);});
     $('tp-close-btn')?.addEventListener('click',(e)=>{e.stopPropagation();hide();});
-    $('tp-steps-list')?.addEventListener('click',async(e)=>{
-      const item=e.target.closest?.('.tp-step-item');
-      if(!item)return;
-      e.stopPropagation();
-      const stepId=Number(item.dataset.stepId);
-      if(Number.isFinite(stepId)){
-        await window.agPulseHost.taskAction?.({action:'toggle-step',conversationId:conversationId(),stepId});
-        refresh(true);
-      }
-    });
     for(const chip of root.querySelectorAll('[data-card]')){
       chip.addEventListener('click',(e)=>{e.stopPropagation();if(cardName===chip.dataset.card){hide();}else{show(chip.dataset.card);}});
     }
@@ -890,7 +872,32 @@ module.exports = function installAgPulseInlineWidget() {
       renderTaskProgress(data.taskProgress);
     }
   }
-  let reinvoking=false;
+  let reinvoking=false,lastTaskProgress=null,reinvokeArmedUntil=0;
+  const REINVOKE_PROMPT='继续推进当前任务，若刚才卡住请换种方式执行';
+  const REINVOKE_CONFIRM_MS=4000;
+  // 只在判定卡死时直接重新调起；模型仍在正常生成时第一次点击只"上膛"，
+  // 4 秒内再点一次才会停止当前生成并发送，避免误中止刚发出的新消息。
+  function reinvokeNeedsConfirm(){
+    if(lastTaskProgress?.isStalled===true)return false;
+    if(Date.now()<reinvokeArmedUntil){reinvokeArmedUntil=0;return false;}
+    reinvokeArmedUntil=Date.now()+REINVOKE_CONFIRM_MS;
+    return true;
+  }
+  async function onReinvokeClick(btn){
+    if(!btn||btn.disabled)return;
+    const idleLabel='⚡ 重新调起';
+    if(reinvokeNeedsConfirm()){
+      btn.textContent='未卡住，再点一次确认';
+      setTimeout(()=>{if(Date.now()>=reinvokeArmedUntil&&!btn.disabled)btn.textContent=idleLabel;},REINVOKE_CONFIRM_MS+50);
+      return;
+    }
+    btn.textContent='调起中…';btn.disabled=true;
+    try{
+      await reinvokeHost();
+      btn.textContent='✓ 已唤醒';refresh(true);
+    }catch{btn.textContent='调起失败';}
+    setTimeout(()=>{btn.textContent=idleLabel;btn.disabled=false;},2000);
+  }
   async function reinvokeHost(){
     if(reinvoking)return;
     reinvoking=true;
@@ -906,10 +913,13 @@ module.exports = function installAgPulseInlineWidget() {
       targetEditor.focus();
       const sel=window.getSelection();
       if(sel){const range=document.createRange();range.selectNodeContents(targetEditor);range.collapse(false);sel.removeAllRanges();sel.addRange(range);}
-      const promptText=(targetEditor.textContent||'').trim()?'':'继续推进当前任务，若刚才卡住请换种方式执行';
+      const promptText=(targetEditor.textContent||'').trim()?'':REINVOKE_PROMPT;
       if(promptText){
-        const ok=document.execCommand?.('insertText',false,promptText);
-        if(!ok||!(targetEditor.textContent||'').trim()){
+        document.execCommand?.('insertText',false,promptText);
+        // 编辑器框架可能异步落字，返回值也不可靠；等一帧后看内容里是否已有提示语，
+        // 只有完全没插进去时才兜底派发一次，绝不重复插入。
+        await new Promise(r=>setTimeout(r,60));
+        if(!(targetEditor.textContent||'').includes(promptText)){
           targetEditor.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertText',data:promptText,bubbles:true,cancelable:true}));
         }
       }
@@ -960,9 +970,8 @@ module.exports = function installAgPulseInlineWidget() {
         .ic-stalled-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 9px;border-radius:8px;background:rgba(245,158,11,0.13);border:1px solid rgba(245,158,11,0.32);color:#f59e0b;font-size:12px;line-height:1.35}
         .ic-reinvoke{background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.45);color:#f59e0b;border-radius:5px;padding:3px 8px;font:inherit;font-size:11.5px;font-weight:600;cursor:pointer;white-space:nowrap;flex:none}
         .ic-reinvoke:hover{background:rgba(245,158,11,0.35);color:#fff}
-        .ic-list{display:flex;flex-direction:column;gap:9px}
-        .ic-step{display:flex;align-items:center;gap:10px;font-size:13.5px;line-height:1.42;cursor:pointer;user-select:none;transition:opacity 140ms ease}
-        .ic-step:hover{opacity:1!important}
+        .ic-list{display:flex;flex-direction:column;gap:9px;pointer-events:none;user-select:none}
+        .ic-step{display:flex;align-items:center;gap:10px;font-size:13.5px;line-height:1.42;cursor:default;user-select:none;pointer-events:none;transition:opacity 140ms ease}
         .ic-step.running{color:currentColor;font-weight:450}
         .ic-step.pending{color:color-mix(in srgb,currentColor 78%,transparent)}
         .ic-step.completed{color:color-mix(in srgb,currentColor 62%,transparent)}
@@ -974,28 +983,7 @@ module.exports = function installAgPulseInlineWidget() {
         @keyframes ag-ic-spin{to{transform:rotate(360deg)}}
         @media(prefers-reduced-motion:reduce){.ic-spin{animation:none}}
       </style><div class="ic-card"><div class="ic-stalled-bar" id="ic-stalled-bar" hidden><span id="ic-stalled-msg"></span><button type="button" class="ic-reinvoke" id="ic-reinvoke-btn">⚡ 重新调起</button></div><div class="ic-list" id="ic-list"></div></div>`);
-      sr.getElementById('ic-list')?.addEventListener('click',async(e)=>{
-        const row=e.target.closest?.('.ic-step');
-        if(!row)return;
-        e.stopPropagation();
-        const stepId=Number(row.dataset.stepId);
-        if(Number.isFinite(stepId)){
-          await window.agPulseHost.taskAction?.({action:'toggle-step',conversationId:conversationId(),stepId});
-          refresh(true);
-        }
-      });
-      sr.getElementById('ic-reinvoke-btn')?.addEventListener('click',async(e)=>{
-        e.stopPropagation();
-        const btn=sr.getElementById('ic-reinvoke-btn');
-        if(!btn)return;
-        btn.textContent='调起中…';btn.disabled=true;
-        try{
-          await reinvokeHost();
-          btn.textContent='✓ 已唤醒';setTimeout(()=>{btn.textContent='⚡ 重新调起';btn.disabled=false;},2000);refresh(true);
-        }catch{
-          btn.textContent='调起失败';setTimeout(()=>{btn.textContent='⚡ 重新调起';btn.disabled=false;},2000);
-        }
-      });
+      sr.getElementById('ic-reinvoke-btn')?.addEventListener('click',e=>{e.stopPropagation();void onReinvokeClick(sr.getElementById('ic-reinvoke-btn'));});
     }
     const relatives=Array.from(bodyDiv.children).filter(c=>c!==chatHost&&c.classList?.contains('relative'));
     const anchorAfter=relatives[relatives.length-1]||null;
@@ -1026,11 +1014,12 @@ module.exports = function installAgPulseInlineWidget() {
         }else if(st==='stalled'){
           iconSvg='<svg viewBox="0 0 16 16" class="ic-svg"><circle cx="8" cy="8" r="6" fill="rgba(245,158,11,0.16)" stroke="#f59e0b" stroke-width="1.4"/><path d="M8 5.2v3.2M8 10.8h.01" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-linecap="round"/></svg>';
         }
-        return `<div class="ic-step ${escHtml(st)}" data-step-id="${Number(s.id)||idx+1}" title="点击切换完成状态"><span class="ic-icon">${iconSvg}</span><span class="ic-title">${escHtml(s.title)}</span></div>`;
+        return `<div class="ic-step ${escHtml(st)}" data-step-id="${Number(s.id)||idx+1}"><span class="ic-icon">${iconSvg}</span><span class="ic-title">${escHtml(s.title)}</span></div>`;
       }).join(''));
     }
   }
   function renderTaskProgress(tp){
+    lastTaskProgress=tp||null;
     if(!root)return;
     const chip=$('task-chip');
     if(!tp){
@@ -1104,7 +1093,7 @@ module.exports = function installAgPulseInlineWidget() {
             iconMarkup='<span class="tp-step-circle stalled">!</span>';
             tagText='疑似卡住';
           }
-          return `<div class="tp-step-item ${escHtml(stepStatus)}" data-step-id="${Number(s.id)||idx+1}" title="点击切换完成状态">` +
+          return `<div class="tp-step-item ${escHtml(stepStatus)}" data-step-id="${Number(s.id)||idx+1}">` +
             `<div class="tp-step-icon">${iconMarkup}</div>` +
             `<div class="tp-step-content"><div class="tp-step-title">${escHtml(s.title)}</div></div>` +
             `<span class="tp-step-tag">${tagText}</span>` +
@@ -1112,7 +1101,7 @@ module.exports = function installAgPulseInlineWidget() {
         }).join(''));
       }
     }
-    const logSnippet=tp.latestTask?.lastLine||(tp.latestTask?`${tp.latestTask.name} (${tp.latestTask.elapsed}s)`:'实时监听 · 点击步骤可手动勾选');
+    const logSnippet=tp.latestTask?.lastLine||(tp.latestTask?`${tp.latestTask.name} (${tp.latestTask.elapsed}s)`:'实时跟随 AI 运行状态（只读）');
     text('tp-task-log',logSnippet);
     renderInlineChatCard(tp);
   }

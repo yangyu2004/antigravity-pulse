@@ -249,3 +249,43 @@ test('MetricsStore.cascadeRunState resolves nested subagent trees and validatedI
     { conversationId: ROOT_ID, force: false }
   );
 });
+
+test('swarm_wait on the board is not reported as stalled until the board-wait threshold', async () => {
+  const brainRoot = await mkdtemp(join(tmpdir(), 'pulse-tm-'));
+  try {
+    const now = Date.now();
+    const start = now - 400_000; // 远超 180s 思考阈值，但低于 30 分钟看板等待阈值
+    const lines = (t0) => [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n派子代理修复问题\n</USER_REQUEST>' },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 2000).toISOString(), tool_calls: [{ name: 'swarm_wait', args: { since: '43' } }] },
+      { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: new Date(t0 + 3000).toISOString(), content: 'Waiting for any message posted after #43.' },
+    ];
+    await setupBrainConv(brainRoot, ROOT_ID, { transcriptLines: lines(start), transcriptMtimeMs: start + 3000 });
+    const r = await new TaskMonitor({ brainRoot }).snapshot(ROOT_ID, { hostGenerating: true, cascadeState: null });
+    assert.equal(r.isStalled, false);
+    assert.equal(r.status, 'running');
+    assert.match(r.headline, /等待子代理看板消息/);
+
+    const old = now - 2_000_000; // 超过 30 分钟仍无回复才提示
+    await setupBrainConv(brainRoot, CHILD_A, { transcriptLines: lines(old), transcriptMtimeMs: old + 3000 });
+    const r2 = await new TaskMonitor({ brainRoot }).snapshot(CHILD_A, { hostGenerating: true, cascadeState: null });
+    assert.equal(r2.isStalled, true);
+    assert.match(r2.stalledReason, /看板消息/);
+
+    // 子代理回消息后（SYSTEM_MESSAGE）等待标记清除，回到普通思考阈值
+    const woke = [...lines(start), { step_index: 3, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date(start + 5000).toISOString(), content: '<SYSTEM_MESSAGE>reviewer done</SYSTEM_MESSAGE>' }];
+    await setupBrainConv(brainRoot, CHILD_B, { transcriptLines: woke, transcriptMtimeMs: start + 5000 });
+    const r3 = await new TaskMonitor({ brainRoot }).snapshot(CHILD_B, { hostGenerating: true, cascadeState: null });
+    assert.equal(r3.isStalled, true);
+    assert.doesNotMatch(r3.stalledReason, /看板消息/);
+  } finally {
+    await rm(brainRoot, { recursive: true, force: true });
+  }
+});
+
+test('task board steps are strictly read-only and driven solely by real-time AI execution', async () => {
+  const monitor = new TaskMonitor();
+  assert.equal(typeof monitor.toggleStep, 'undefined', 'Manual toggleStep must not exist');
+  assert.equal(typeof monitor.setSteps, 'undefined', 'Manual setSteps must not exist');
+  assert.equal('customSteps' in monitor, false, 'Manual customSteps override map must not exist');
+});

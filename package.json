@@ -1,6 +1,6 @@
 {
   "name": "antigravity-pulse",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "description": "Claude-style inline step card, token throughput/cache/context & quota monitor, anti-stall monitor, and auto Chinese title renamer for Antigravity",
   "license": "MIT",
