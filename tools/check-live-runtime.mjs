@@ -1,9 +1,8 @@
 // Read-only diagnostic of the installed plugin's own UI bridge. No titles, URLs, credentials or raw RPC records are printed.
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { discoverTargets, CdpConnection } from '../compat/runtime-ui.mjs';
+import { platformPaths } from '../compat/platform.mjs';
 
-const profile=join(process.env.APPDATA || join(homedir(),'AppData','Roaming'),'Antigravity');
+const profile = platformPaths().profile;
 const selected=process.argv[2] || null;
 if(selected && !/^[0-9a-f-]{36}$/i.test(selected))throw new Error('Invalid diagnostic conversation');
 for (const target of await discoverTargets(profile)) {

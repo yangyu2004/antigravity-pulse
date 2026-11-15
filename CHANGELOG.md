@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3 — 2026-11-15
+
+- **Antigravity 2.32.1 客户端适配**：全面验证在 macOS 最新版 Antigravity 桌面客户端（v2.32.1，Electron 26.5.0，Chromium 152.0.7977.167）下的运行表现。CDP loopback 注入通道、状态栏全指标监控、Claude 风格只读步骤卡片、90+ 历史会话恢复及防卡死唤醒机制均实机验证通过。
+- **后台自动更新 Sidecar 重载修复**：修复 `compat/auto-updater.py` 中 `reload_idle_sidecar()` 在 macOS 宿主下无法正确识别 Sidecar 进程的问题。重构为优先读取 `~/.gemini/antigravity/sidecar_data/antigravity-pulse/panel/data/active-sidecar.json` 中的权威 PID，校验当前用户权限及 Sidecar 运行特征后发送 `SIGTERM` 触发平滑重启，并保留多模式进程扫描作为兜底。
+- **诊断脚本跨平台适配**：修复 `tools/check-live-runtime.mjs` 硬编码 Windows `AppData/Roaming` 路径的缺陷，统一引入 `compat/platform.mjs` 中的 `platformPaths().profile` 动态获取环境配置目录。
+- **文档与矩阵更新**：更新 `COMPATIBILITY.md` 兼容性矩阵，记录 Antigravity 2.32.1 实机验收详情。
+
+## 0.9.2 — 2026-11-15
+
+- **锁定 Claude 风格任务看板为纯 AI 实时驱动（只读）**：彻底移除对话气泡内嵌步骤看板与进度弹窗看板的用户点击切换状态交互及 `customSteps` 覆盖逻辑，步骤进度 100% 由 AI 实时执行（`task_steps.json`、`transcript.jsonl`、生命周期钩子与子代理运行态）驱动，杜绝误触篡改与进度冻结。
+- **默认开启的后台静默自动更新系统**：新增常驻 Sidecar 自动检测/升级（`AppUpdater.startAutoUpdate`）与跨平台独立自动更新程序（`compat/auto-updater.py` + 系统定时任务 + 生命周期空闲触发），自动完成 SHA-256 校验、完整运行时（含 `hooks`/`rules`）原子替换，并在 AI 空闲时无感热重载。
+- **子代理 / Swarm 看板等待防误报与唤醒二次确认**：修复 `swarm_wait` 看板等待误报卡死问题；正常生成期间点击 `⚡ 重新调起` 需二次确认，防止误中止正在运行的回复；优化超长原始 Prompt 标题自动精炼。
+
 ## 0.8.14 — 2026-10-30
 
 - Fix [#24](https://github.com/YOU-SHOULD-KNOW-ME/antigrative-dashboard/issues/24): resolve a sidebar subagent from its local conversation area and composer instead of falling back to the main page's conversation. Focus changes refresh the selected agent promptly; unavailable or ambiguous local identities do not borrow the parent's statistics.

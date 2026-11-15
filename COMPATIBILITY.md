@@ -2,11 +2,11 @@
 
 | 系统 | 安装 / 后台发现 | 验证范围 |
 | --- | --- | --- |
-| Windows | Python / PowerShell，CIM 筛选 standalone + 单次 netstat PID 所属监听端口 | Windows 11 / 桌面 App 2.21.1、2.22.0；真实对话上下文、合并悬浮卡已实机验证并验收；CI 生命周期与数据测试 |
-| Linux | Python3 / POSIX shell，当前用户 `/proc` + TCP/TCP6 socket inode | Ubuntu CI 原生端口测试、安装生命周期、官方 2.21.1 资源与 SDK 检查；完整登录 App GUI 待用户实机验证 |
-| macOS | Python3 / POSIX shell，当前用户 `ps` + `lsof` PID 所属端口 | macOS CI 原生端口测试、安装生命周期、官方 2.21.1 资源与 SDK 检查；完整登录 App GUI 待用户实机验证 |
+| Windows | Python / PowerShell，CIM 筛选 standalone + 单次 netstat PID 所属监听端口 | Windows 11 / 桌面 App 2.21.1、2.22.0、2.28.0、2.28.2；真实对话上下文、合并悬浮卡已实机验证并验收；CI 生命周期与数据测试 |
+| Linux | Python3 / POSIX shell，当前用户 `/proc` + TCP/TCP6 socket inode | Ubuntu CI 原生端口测试、安装生命周期、官方 2.21.1/2.28.2 资源与 SDK 检查；完整登录 App GUI 待用户实机验证 |
+| macOS | Python3 / POSIX shell，当前用户 `ps` + `lsof` PID 所属端口 | macOS (arm64) / 桌面 App **2.32.1**（Electron 26.5.0 / Chromium 152.0.7977.167）实机已验证并验收：CDP loopback 注入（`#ag-pulse-status-bar`、`.ag-pulse-inline-chat-host` 步骤卡片）、真实 TPS/缓存率/上下文窗口与历史会话恢复正常；CI 原生端口测试、安装生命周期测试通过 |
 
-上表面向 **Antigravity 桌面 App 2.21.1 / 2.22.0**。CLI 使用独立 statusLine 适配；v0.7.0 新增自带 IDE 的独立 VSIX。VS Code、Visual Studio、JetBrains、Zed、Xcode 中的 Antigravity 扩展以及 iOS 尚未兼容。表中保留早期桌面 App 2.21.1 的资源验证记录；v0.8.13 的资源检查目标更新为 2.28.2，仍不等同于 IDE 或登录后 GUI 验收。
+上表面向 **Antigravity 桌面 App 2.32.1** 及历史版本。CLI 使用独立 statusLine 适配；v0.7.0 新增自带 IDE 的独立 VSIX。VS Code、Visual Studio、JetBrains、Zed、Xcode 中的 Antigravity 扩展以及 iOS 尚未兼容。表中保留早期桌面 App 2.21.1 的资源验证记录；v0.8.13 的资源检查目标更新为 2.28.2；v0.9.3 已在 macOS 2.32.1 实机全面验收。
 Python 3.10+ 仅用于生命周期，无 pip 依赖；后台使用宿主 Node，内嵌桥接需原生 WebSocket，建议 Node 24。Linux/macOS 架构跟随宿主，不分发平台二进制。官方系统要求见 [Antigravity 下载页](https://antigravity.google/download)。
 
 2026-10-28 补充：Windows 11 / 桌面 App **2.28.0** 已实机验证修复后的单份控件、历史会话速率／Token／上下文恢复、详情卡、用量窗口、额度和会话往返切换。延迟回调与重复挂载的浏览器回归纳入三系统 CI；这不等同于 Linux/macOS 2.28.0 或新版独立 IDE 的登录后实机验收。安装后需要完整退出并重开宿主一次。
@@ -21,9 +21,16 @@ Python 3.10+ 仅用于生命周期，无 pip 依赖；后台使用宿主 Node，
 
 2026-10-30 / **v0.8.14**：修复 App 侧栏子代理误取主会话统计，按官方 2.28.2 的消息区／输入框兄弟结构识别局部会话；未知身份保持为空，仅内联请求禁止自动选择最近会话。Node 346 项通过、1 项跳过；中英文侧栏、Full View、原有 Teamwork、子代理、生命周期及 IDE 浏览器回归通过。新场景为使用生产控件的合成 DOM 验证，不等于反馈者原始会话或各系统登录后的实机验收。
 
+2026-11-15 / App **2.32.1** 与 **v0.9.3** 实机验收（macOS arm64）：
+- **运行环境**：macOS (darwin-arm64), 官方 Antigravity 桌面 App 2.32.1 (Build `2.32.1-6001966350991360`), Electron 26.5.0, Chromium 152.0.7977.167, ASAR 具备 `ElectronAsarIntegrity` 强制校验保护。
+- **CDP 与 UI 注入实机验证**：`DevToolsActivePort` 端口监听正常，`compat/runtime-ui.mjs` 通过 WebSocket 成功连接活动页面（`https://127.0.0.1:59188/c/<id>`）。状态栏 `#ag-pulse-status-bar` 正常挂载并展示实时 TPS（100+ tok/s）、缓存率（90%+）与上下文百分比；Claude 风格气泡内嵌步骤卡片 `.ag-pulse-inline-chat-host` 纯 AI 状态只读锁定生效，多步骤动画（running/pending/completed）正常运转。
+- **自动更新进程重载修复**：修复 `compat/auto-updater.py` 中 `reload_idle_sidecar()` 逻辑，优先从 `~/.gemini/antigravity/sidecar_data/antigravity-pulse/panel/data/active-sidecar.json` 读取权威 PID，校验当前用户权限及 Sidecar 运行特征后发送 `SIGTERM` 触发平滑重启接管，并保留多模式进程扫描作为兜底。
+- **诊断工具跨平台修复**：修复 `tools/check-live-runtime.mjs` 中硬编码 Windows 路径的问题，统一调用 `compat/platform.mjs` 中的 `platformPaths().profile` 动态获取配置目录。
+- **本地测试门禁**：Node 原生测试 359 项全绿通过，Python 单元测试 95 项全绿通过（2 项跳过 Windows junctions），IDE 扩展测试 11 项全绿通过，宿主语言服务器与嵌入式 SDK 检测正常。
+
 ## Antigravity 自带 IDE
 
-专用包为 `antigrative-dashboard-ide-0.8.14.vsix`，安装入口与桌面 App 独立。
+专用包为 `antigrative-dashboard-ide-0.9.3.vsix`，安装入口与桌面 App 独立。
 Windows 11 / IDE 2.5.5（VS Code base 1.107.0）已用真实对话验证速率、缓存、上下文、重启历史恢复和窄宽布局。
 Linux/macOS 的 IDE 进程筛选、端口归属、安装打包和 Trusted Types 浏览器 fixture 纳入 CI；登录后的 IDE GUI 仍待实机验收。
 当前仅支持默认用户 profile；私有 Preact/DOM 或 RPC 变化可能需要适配，不能保证未来 IDE 版本无需维护。

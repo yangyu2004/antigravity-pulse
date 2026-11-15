@@ -79,30 +79,117 @@ def is_ai_turn_active(home: Path) -> bool:
     return False
 
 
+def _is_panel_sidecar_proc(pid: int, uid: int) -> bool:
+    """Verify that the process is alive, belongs to the current user, and is running the panel sidecar."""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    try:
+        res = subprocess.run(
+            ['ps', '-ww', '-p', str(pid), '-o', 'uid=,args='],
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            parts = res.stdout.strip().split(None, 1)
+            if len(parts) >= 2:
+                proc_uid = int(parts[0])
+                proc_args = parts[1]
+                if proc_uid != uid:
+                    return False
+                if 'main.mjs' in proc_args and (
+                    'antigravity-pulse' in proc_args
+                    or 'sidecar_sdk' in proc_args
+                    or 'register_loader' in proc_args
+                ):
+                    return True
+                try:
+                    cwd_res = subprocess.run(
+                        ['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if cwd_res.returncode == 0 and 'antigravity-pulse' in cwd_res.stdout:
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    proc_dir = Path(f'/proc/{pid}')
+    if proc_dir.is_dir():
+        try:
+            if proc_dir.stat().st_uid != uid:
+                return False
+            cmdline = (proc_dir / 'cmdline').read_bytes().replace(b'\x00', b' ').decode('utf-8', errors='ignore')
+            if 'main.mjs' in cmdline and (
+                'antigravity-pulse' in cmdline
+                or 'sidecar_sdk' in cmdline
+                or 'register_loader' in cmdline
+            ):
+                return True
+            try:
+                target = os.readlink(str(proc_dir / 'cwd'))
+                if 'antigravity-pulse' in target:
+                    return True
+            except OSError:
+                pass
+        except Exception:
+            pass
+
+    return False
+
+
 def reload_idle_sidecar(home: Path):
     """Gracefully stop idle Antigravity Pulse sidecar so host respawns new version."""
     if is_ai_turn_active(home):
         return False
     if os.name == 'nt':
         return False  # Sidecar's own AppUpdater handles Windows reload safely
+
+    current_uid = os.getuid()
+
+    # 1. Prioritize reading active PID from active-sidecar.json
+    data_dir_env = os.environ.get('ANTIGRAVITY_EXECUTABLE_DATA_DIR')
+    if data_dir_env:
+        active_file = Path(data_dir_env) / 'active-sidecar.json'
+    else:
+        active_file = home / '.gemini' / 'antigravity' / 'sidecar_data' / 'antigravity-pulse' / 'panel' / 'data' / 'active-sidecar.json'
+
+    if active_file.is_file():
+        record = read_json(active_file, {})
+        pid = record.get('pid')
+        if isinstance(pid, int) and _is_panel_sidecar_proc(pid, current_uid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                return True
+            except OSError:
+                pass
+
+    # 2. Retain robust fallback for process matching
     try:
-        proc = subprocess.run(
-            ['pgrep', '-u', str(os.getuid()), '-f', 'antigravity-pulse/sidecars/panel/main.mjs'],
-            capture_output=True, text=True, timeout=5
-        )
-        if proc.returncode != 0:
-            return False
+        candidates = []
+        for pattern in ['antigravity-pulse/sidecars/panel/main.mjs', 'sidecar_sdk/register_loader.js main.mjs']:
+            proc = subprocess.run(
+                ['pgrep', '-u', str(current_uid), '-f', pattern],
+                capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    pid_str = line.strip()
+                    if pid_str.isdigit():
+                        candidates.append(int(pid_str))
+
         reloaded = False
-        for line in proc.stdout.splitlines():
-            pid_str = line.strip()
-            if pid_str.isdigit():
-                pid = int(pid_str)
-                if pid != os.getpid():
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                        reloaded = True
-                    except OSError:
-                        pass
+        for pid in candidates:
+            if pid != os.getpid():
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    reloaded = True
+                except OSError:
+                    pass
         return reloaded
     except Exception:
         return False
