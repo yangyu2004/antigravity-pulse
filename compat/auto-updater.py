@@ -100,21 +100,18 @@ def _is_panel_sidecar_proc(pid: int, uid: int) -> bool:
                 proc_args = parts[1]
                 if proc_uid != uid:
                     return False
-                if 'main.mjs' in proc_args and (
-                    'antigravity-pulse' in proc_args
-                    or 'sidecar_sdk' in proc_args
-                    or 'register_loader' in proc_args
-                ):
-                    return True
-                try:
-                    cwd_res = subprocess.run(
-                        ['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if cwd_res.returncode == 0 and 'antigravity-pulse' in cwd_res.stdout:
+                if 'main.mjs' in proc_args:
+                    if 'antigravity-pulse' in proc_args:
                         return True
-                except Exception:
-                    pass
+                    try:
+                        cwd_res = subprocess.run(
+                            ['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if cwd_res.returncode == 0 and 'antigravity-pulse' in cwd_res.stdout:
+                            return True
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -124,18 +121,15 @@ def _is_panel_sidecar_proc(pid: int, uid: int) -> bool:
             if proc_dir.stat().st_uid != uid:
                 return False
             cmdline = (proc_dir / 'cmdline').read_bytes().replace(b'\x00', b' ').decode('utf-8', errors='ignore')
-            if 'main.mjs' in cmdline and (
-                'antigravity-pulse' in cmdline
-                or 'sidecar_sdk' in cmdline
-                or 'register_loader' in cmdline
-            ):
-                return True
-            try:
-                target = os.readlink(str(proc_dir / 'cwd'))
-                if 'antigravity-pulse' in target:
+            if 'main.mjs' in cmdline:
+                if 'antigravity-pulse' in cmdline:
                     return True
-            except OSError:
-                pass
+                try:
+                    target = os.readlink(str(proc_dir / 'cwd'))
+                    if 'antigravity-pulse' in target:
+                        return True
+                except OSError:
+                    pass
         except Exception:
             pass
 
@@ -183,8 +177,10 @@ def reload_idle_sidecar(home: Path):
                         candidates.append(int(pid_str))
 
         reloaded = False
+        seen = set()
         for pid in candidates:
-            if pid != os.getpid():
+            if pid not in seen and pid != os.getpid() and _is_panel_sidecar_proc(pid, current_uid):
+                seen.add(pid)
                 try:
                     os.kill(pid, signal.SIGTERM)
                     reloaded = True
