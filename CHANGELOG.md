@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.6 — 2026-11-16
+
+- **修复定时器条件取消 / 任务清空后仍显示「后台任务运行中」的 Bug**：
+  - 修复 `sidecars/panel/task-monitor.mjs` 未清除因 `TimerCondition` 被宿主静默取消的 `schedule` 定时器任务、以及未识别 `manage_task(list)` 返回 `No background tasks are currently running.` 导致看板卡在 `后台任务运行中 (task-xxx)` 的问题。
+  - 区分 `Timer:` / `Cron:` 定时器与实际命令后台任务（支持超时过期与 `Stop + DOM 无任务` 自动清理），并将 `inline-widget.cjs` DOM 扫描扩展至最近 8 条响应。
+
 ## 0.9.5 — 2026-11-16
 
 - **修复后台异步任务仍在运行（`1 task running`）时任务看板误判为全部完成的 Bug**：

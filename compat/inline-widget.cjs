@@ -817,7 +817,7 @@ module.exports = function installAgPulseInlineWidget() {
     if(!convScope)return {subagents:0,tasks:0};
     const checkSet=[];
     const responses=convScope.querySelectorAll('[data-testid="agent-response"]');
-    for(let i=Math.max(0,responses.length-4);i<responses.length;i++){
+    for(let i=Math.max(0,responses.length-8);i<responses.length;i++){
       const all=responses[i].querySelectorAll('span,div,button');
       for(let j=Math.max(0,all.length-80);j<all.length;j++)checkSet.push(all[j]);
     }

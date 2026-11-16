@@ -421,6 +421,40 @@ test('running background task (1 task running) keeps board running below 100% un
       validatedInput({ conversationId: ROOT_ID, domRunningTasks: 2 }),
       { conversationId: ROOT_ID, force: false, domRunningTasks: 2 }
     );
+
+    // 4. schedule 定时器在绑定任务结束后被静默取消 / manage_task(list) 返回 "No background tasks are currently running." 时，绝不能残留假运行态
+    const timerTaskId = `${CHILD_B}/task-176`;
+    const mainTaskId = `${CHILD_B}/task-174`;
+    await setupBrainConv(brainRoot, CHILD_B, {
+      transcriptLines: [
+        { step_index: 173, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(now - 60_000).toISOString(), tool_calls: [{ name: 'run_command', args: { CommandLine: 'echo ok' } }] },
+        { step_index: 174, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: new Date(now - 59_000).toISOString(), content: `Tool is running as a background task with task id: ${mainTaskId}\nTask Description: echo ok` },
+        { step_index: 175, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(now - 58_000).toISOString(), tool_calls: [{ name: 'schedule', args: { DurationSeconds: '50', TimerCondition: mainTaskId } }] },
+        { step_index: 176, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: new Date(now - 57_000).toISOString(), content: `Tool is running as a background task with task id: ${timerTaskId}\nTask Description: Timer: 50s, Prompt: check` },
+        { step_index: 178, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date(now - 40_000).toISOString(), content: `<SYSTEM_MESSAGE>\n[Message] sender=${mainTaskId} content=Task id "${mainTaskId}" finished with result:\nOK\n</SYSTEM_MESSAGE>` },
+        { step_index: 185, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(now - 5000).toISOString(), tool_calls: [{ name: 'manage_task', args: { Action: 'list' } }] },
+        { step_index: 187, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: new Date(now - 4000).toISOString(), content: 'No background tasks are currently running.' },
+        { step_index: 188, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(now - 2000).toISOString(), content: '已全部验证通过。', tool_calls: [] },
+      ],
+      transcriptMtimeMs: now - 2000,
+      lifecycle: { event: 'Stop', timestampMs: now - 1500, fullyIdle: true, terminationReason: 'NO_TOOL_CALL', conversationId: CHILD_B },
+      taskSteps: {
+        objective: '配置代理并新增槽位',
+        steps: [
+          { id: 1, title: '配置代理', status: 'completed' },
+          { id: 2, title: '验证槽位', status: 'completed' },
+        ],
+      },
+      taskStepsMtimeMs: now - 5000,
+    });
+    const timerClearedSnap = await monitor.snapshot(CHILD_B, {
+      hostGenerating: false,
+      domRunningTasks: 0,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_IDLE', selfRunning: false, selfSettled: true, selfHasActiveChildren: false, selfModifiedMs: now - 2000, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(timerClearedSnap.status, 'completed');
+    assert.equal(timerClearedSnap.progressPercent, 100);
+    assert.ok(timerClearedSnap.steps.every(s => s.status === 'completed'));
   } finally {
     await rm(brainRoot, { recursive: true, force: true });
   }

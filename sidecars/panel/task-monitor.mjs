@@ -71,6 +71,16 @@ export class TaskMonitor {
     const domTaskCount = Number.isSafeInteger(domRunningTasks) && domRunningTasks > 0 ? domRunningTasks : 0;
     const activeBgTasks = [];
     for (const task of tState.runningBgTasks?.values() || []) {
+      if (task.isTimer) {
+        // schedule 定时器仅在未超时且尚未收到宿主静默收口（Stop + DOM 无运行中任务）时视为活跃
+        const timerExpired = task.durationMs > 0 && task.startedAtMs > 0 && (now - task.startedAtMs) >= task.durationMs + 5000;
+        const settledWithoutDomTask = hostGenerating === false && domTaskCount === 0 && tState.lastStepFinished &&
+          lifecycleEvent === 'Stop' && lifecycle?.fullyIdle !== false;
+        if (!timerExpired && !settledWithoutDomTask && (!task.startedAtMs || (now - task.startedAtMs) < BG_TASK_MAX_AGE_MS)) {
+          activeBgTasks.push(task);
+        }
+        continue;
+      }
       if (domTaskCount > 0 || !task.startedAtMs || (now - task.startedAtMs) < BG_TASK_MAX_AGE_MS) {
         activeBgTasks.push(task);
       }
@@ -714,7 +724,8 @@ export class TaskMonitor {
         lastErrorMs: 0,
         lastStepFinished: true,
         waitingOnBoard: false,
-        runningBgTasks: new Map()
+        runningBgTasks: new Map(),
+        pendingTimerConditions: []
       };
     }
 
@@ -729,6 +740,7 @@ export class TaskMonitor {
         cache.modelStepsAfterPlan = 0;
         cache.waitingOnBoard = false;
         cache.runningBgTasks.clear();
+        cache.pendingTimerConditions = [];
       }
 
       if (st.size > cache.lastSize) {
@@ -815,12 +827,22 @@ export class TaskMonitor {
             if (/\[Notice\]\s*All your subagents and background tasks have been stopped/i.test(sysContent)) {
               cache.runningBgTasks.clear();
             } else {
+              const finishedIds = [];
               for (const m of sysContent.matchAll(/Task id\s+"([^"]+)"\s+finished/gi)) {
-                cache.runningBgTasks.delete(m[1].trim());
+                finishedIds.push(m[1].trim());
               }
               if (/finished with result:/i.test(sysContent)) {
                 const senderMatch = sysContent.match(/sender=([^\s\]]+)/i);
-                if (senderMatch) cache.runningBgTasks.delete(senderMatch[1].trim());
+                if (senderMatch) finishedIds.push(senderMatch[1].trim());
+              }
+              for (const fid of finishedIds) {
+                cache.runningBgTasks.delete(fid);
+                // 若有绑定该 task 的条件定时器（TimerCondition），宿主会自动静默取消该定时器
+                for (const [tid, taskObj] of Array.from(cache.runningBgTasks.entries())) {
+                  if (taskObj.timerCondition && (taskObj.timerCondition === fid || fid.endsWith(`/${taskObj.timerCondition}`) || taskObj.timerCondition.endsWith(`/${fid}`))) {
+                    cache.runningBgTasks.delete(tid);
+                  }
+                }
               }
             }
           }
@@ -845,14 +867,29 @@ export class TaskMonitor {
 
         if (step.source === 'MODEL' && step.type === 'GENERIC') {
           const genContent = String(step.content || '');
+          if (/No background tasks are currently running\.?/i.test(genContent)) {
+            cache.runningBgTasks.clear();
+            continue;
+          }
+          for (const cm of genContent.matchAll(/Wait cancelled\s*\(\s*task\s+([^\s)]+)\s+has already finished\s*\)/gi)) {
+            cache.runningBgTasks.delete(cm[1].trim());
+          }
           const bgMatch = genContent.match(/Tool is running as a background task with task id:\s*([^\s\n]+)/i);
           if (bgMatch && step.status !== 'DONE') {
             const taskId = bgMatch[1].trim();
             const descMatch = genContent.match(/Task Description:\s*([^\n]+)/i);
+            const description = descMatch ? descMatch[1].trim() : '';
+            const timerMatch = description.match(/^Timer:\s*(\d+)s\b/i);
+            const isTimer = Boolean(timerMatch || /^Cron:/i.test(description));
+            const durationMs = timerMatch ? Number(timerMatch[1]) * 1000 : 0;
+            const timerCondition = isTimer ? (cache.pendingTimerConditions.shift() || null) : null;
             cache.runningBgTasks.set(taskId, {
               id: taskId,
               startedAtMs: stepTs || now,
-              description: descMatch ? descMatch[1].trim() : ''
+              description,
+              isTimer,
+              durationMs,
+              timerCondition
             });
           }
           continue;
@@ -863,8 +900,14 @@ export class TaskMonitor {
           const hasTools = toolCalls.length > 0;
           cache.waitingOnBoard = toolCalls.some(tc => BOARD_WAIT_TOOLS.has(tc?.name));
           for (const tc of toolCalls) {
-            if (tc?.name === 'manage_task' && tc?.args?.Action === 'kill' && tc?.args?.TaskId) {
-              const rawKillId = String(tc.args.TaskId).trim();
+            if (tc?.name === 'schedule' && tc?.args) {
+              const cond = this.unwrapArg(tc.args.TimerCondition);
+              if (cond && cond !== 'never' && cond !== 'any') {
+                cache.pendingTimerConditions.push(cond);
+              }
+            }
+            if (tc?.name === 'manage_task' && tc?.args?.Action && /kill/i.test(this.unwrapArg(tc.args.Action)) && tc?.args?.TaskId) {
+              const rawKillId = this.unwrapArg(tc.args.TaskId);
               for (const existingId of Array.from(cache.runningBgTasks.keys())) {
                 if (existingId === rawKillId || existingId.endsWith(`/${rawKillId}`)) {
                   cache.runningBgTasks.delete(existingId);
