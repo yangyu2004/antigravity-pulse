@@ -28,6 +28,9 @@ export function validatedInput(value) {
   if (Number.isSafeInteger(value.domRunningSubagents) && value.domRunningSubagents > 0 && value.domRunningSubagents <= 128) {
     result.domRunningSubagents = value.domRunningSubagents;
   }
+  if (Number.isSafeInteger(value.domRunningTasks) && value.domRunningTasks > 0 && value.domRunningTasks <= 128) {
+    result.domRunningTasks = value.domRunningTasks;
+  }
   // Historical usage import is an explicit, user-visible action. It must not
   // be started by the high-frequency inline metrics poll.
   if (value.usageSync === true) result.usageSync = true;

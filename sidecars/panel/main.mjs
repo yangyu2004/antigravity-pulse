@@ -43,6 +43,7 @@ const metrics = async input => {
   const taskProgress=await taskMonitor.snapshot(input?.conversationId,{
     hostGenerating:input?.hostGenerating,
     domRunningSubagents:input?.domRunningSubagents,
+    domRunningTasks:input?.domRunningTasks,
     cascadeState,
   });
   if(taskProgress?.status==='running'||taskProgress?.status==='stalled')activeTurnAt=Date.now();

@@ -350,3 +350,78 @@ test('completed conversation from days ago never shows elapsed silence as stalle
     await rm(brainRoot, { recursive: true, force: true });
   }
 });
+
+test('running background task (1 task running) keeps board running below 100% until task finishes', async () => {
+  const brainRoot = await mkdtemp(join(tmpdir(), 'pulse-tm-bgtask-'));
+  try {
+    const now = Date.now();
+    const t0 = now - 240_000; // 4 分钟前启动的后台任务（预计跑 5~15 分钟）
+    const taskId = `${ROOT_ID}/task-73`;
+    const initialLines = [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0 - 10_000).toISOString(), content: '<USER_REQUEST>\n启动全套检测\n</USER_REQUEST>' },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 - 5000).toISOString(), tool_calls: [{ name: 'read_file', args: { Path: '/repo/claude_probe.py' } }] },
+      { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 - 2000).toISOString(), tool_calls: [{ name: 'run_command', args: { toolSummary: '启动快速档位黑盒探针全量检测', CommandLine: 'python3 run.py' } }] },
+      { step_index: 3, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: new Date(t0).toISOString(), content: `Created At: 2026-11-16T14:42:03+08:00\nTool is running as a background task with task id: ${taskId}\nTask Description: python3 run.py` },
+      { step_index: 4, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 15_000).toISOString(), content: '检测正在后台运行，完成后我会自动为你汇总结果。', tool_calls: [] },
+    ];
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: initialLines,
+      transcriptMtimeMs: t0 + 15_000,
+      lifecycle: { event: 'Stop', timestampMs: t0 + 15_200, fullyIdle: true, terminationReason: 'NO_TOOL_CALL', conversationId: ROOT_ID },
+    });
+
+    const monitor = new TaskMonitor({ brainRoot });
+    // 1. 即使主回复已完成（tool_calls: [] 且 Stop），后台 task-73 仍在运行，绝不能显示全部完成或 4 分钟误报卡死
+    const runningSnap = await monitor.snapshot(ROOT_ID, {
+      hostGenerating: false,
+      domRunningTasks: 1,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_IDLE', selfRunning: false, selfSettled: true, selfHasActiveChildren: false, selfModifiedMs: t0 + 15_000, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(runningSnap.status, 'running');
+    assert.equal(runningSnap.isStalled, false, '4-minute background task must not false-stall at 180s');
+    assert.ok(runningSnap.progressPercent < 100, `Expected < 100% while background task runs, got ${runningSnap.progressPercent}`);
+    assert.ok(runningSnap.steps.some(s => s.status === 'running'), 'Must keep an active running step');
+    assert.ok(!runningSnap.steps.every(s => s.status === 'completed'), 'Must never mark all steps completed while task is running');
+    assert.match(runningSnap.headline, /后台任务运行中/);
+
+    // 2. 即使仅凭 DOM 的 "1 task running"（无 transcript 后台记录）也必须维持运行态
+    await setupBrainConv(brainRoot, CHILD_A, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n运行检测\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 2000).toISOString(), tool_calls: [{ name: 'run_command', args: { toolSummary: '启动测试脚本', CommandLine: 'python3 test.py' } }] },
+        { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 4000).toISOString(), content: '已在后台运行。', tool_calls: [] },
+      ],
+      transcriptMtimeMs: t0 + 4000,
+    });
+    const domOnlySnap = await monitor.snapshot(CHILD_A, { hostGenerating: false, domRunningTasks: 1, cascadeState: null });
+    assert.equal(domOnlySnap.status, 'running');
+    assert.ok(domOnlySnap.progressPercent < 100);
+    assert.ok(domOnlySnap.steps.some(s => s.status === 'running'));
+
+    // 3. 后台任务完成后（SYSTEM_MESSAGE 到达 + 最终总结完毕 + domRunningTasks=0），干净切回 completed 100%
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: [
+        ...initialLines,
+        { step_index: 5, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date(now - 2000).toISOString(), content: `<SYSTEM_MESSAGE>\n[Message] sender=${taskId} content=Task id "${taskId}" finished with result:\nDONE\n</SYSTEM_MESSAGE>` },
+        { step_index: 6, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(now - 1000).toISOString(), content: '全部检测已完成！', tool_calls: [] },
+      ],
+      transcriptMtimeMs: now - 1000,
+      lifecycle: { event: 'Stop', timestampMs: now - 900, fullyIdle: true, terminationReason: 'NO_TOOL_CALL', conversationId: ROOT_ID },
+    });
+    const doneSnap = await monitor.snapshot(ROOT_ID, {
+      hostGenerating: false,
+      domRunningTasks: 0,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_IDLE', selfRunning: false, selfSettled: true, selfHasActiveChildren: false, selfModifiedMs: now - 1000, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(doneSnap.status, 'completed');
+    assert.equal(doneSnap.progressPercent, 100);
+    assert.ok(doneSnap.steps.every(s => s.status === 'completed'));
+
+    assert.deepEqual(
+      validatedInput({ conversationId: ROOT_ID, domRunningTasks: 2 }),
+      { conversationId: ROOT_ID, force: false, domRunningTasks: 2 }
+    );
+  } finally {
+    await rm(brainRoot, { recursive: true, force: true });
+  }
+});

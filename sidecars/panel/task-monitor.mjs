@@ -6,8 +6,9 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const THINK_STALL_SEC = 180; // 高推理模型正常思考可达 60~120s，超过 180s 无任何响应才判疑似卡死
 const TOOL_STALL_SEC = 90;
 const MAX_INITIAL_READ_BYTES = 262144;
-// swarm_wait / wait_for_message 会阻塞到子代理在看板发消息，正常可等几十分钟；只有超过 30 分钟仍无回复才提示
+// swarm_wait / wait_for_message 与后台长耗时任务均可能等待数分钟至数十分钟；超过 30 分钟仍无进度再提示
 const BOARD_WAIT_STALL_SEC = 1800;
+const BG_TASK_MAX_AGE_MS = 12 * 3600 * 1000;
 const BOARD_WAIT_TOOLS = new Set(['swarm_wait', 'wait_for_message']);
 
 export class TaskMonitor {
@@ -18,7 +19,7 @@ export class TaskMonitor {
     this.lastTurnFinished = new Map();
   }
 
-  async snapshot(conversationId, { hostGenerating = null, domRunningSubagents = 0, cascadeState = null } = {}) {
+  async snapshot(conversationId, { hostGenerating = null, domRunningSubagents = 0, domRunningTasks = 0, cascadeState = null } = {}) {
     if (!conversationId || !GUID.test(conversationId)) {
       return this.defaultSnapshot('idle', '等待对话启动');
     }
@@ -66,6 +67,16 @@ export class TaskMonitor {
     const lsRunning = cascadeState?.selfRunning === true;
     const lsSettled = cascadeState?.selfSettled === true;
     const hasLsSelfStatus = Boolean(cascadeState?.selfStatus);
+
+    const domTaskCount = Number.isSafeInteger(domRunningTasks) && domRunningTasks > 0 ? domRunningTasks : 0;
+    const activeBgTasks = [];
+    for (const task of tState.runningBgTasks?.values() || []) {
+      if (domTaskCount > 0 || !task.startedAtMs || (now - task.startedAtMs) < BG_TASK_MAX_AGE_MS) {
+        activeBgTasks.push(task);
+      }
+    }
+    const runningBgTaskCount = Math.max(activeBgTasks.length, domTaskCount);
+    const hasRunningBgTasks = runningBgTaskCount > 0;
 
     // 检测“新一轮刚发起，但 transcript.jsonl 尚未刷入新 USER_INPUT”的瞬态窗口：
     // 1) 上一轮已结束，现收到新 PreInvocation/PreToolUse 或宿主输入框进入生成态/语言服务转为运行态（且无旧子代理在跑）；
@@ -167,6 +178,7 @@ export class TaskMonitor {
 
     const inActiveTurn = Boolean(
       hasRunningSubagents ||
+      hasRunningBgTasks ||
       lsRunning ||
       hostGenerating === true ||
       pendingNewUserTurn ||
@@ -205,18 +217,21 @@ export class TaskMonitor {
     const subagentActivityMs = hasRunningSubagents
       ? Math.max(cascadeState?.latestRunningSubagentModifiedMs || 0, subagentProbe.latestMtimeMs || 0)
       : 0;
+    const activeBgTaskMs = activeBgTasks.reduce((maxMs, task) => Math.max(maxMs, task.startedAtMs || 0), 0);
     const lastActivityMs = Math.max(
       pendingNewUserTurn ? pendingAnchorMs : 0,
       lifecycleMs > effectivePrevTurnEndMs ? lifecycleMs : 0,
       pendingNewUserTurn ? 0 : (tState.lastGrowthMs || 0),
       latestTask ? latestTask.mtimeMs : 0,
+      activeBgTaskMs,
       lsRunning ? (cascadeState?.selfModifiedMs || 0) : 0,
       subagentActivityMs
     );
     const silenceSec = lastActivityMs > 0 ? Math.max(0, Math.round((now - lastActivityMs) / 1000)) : 0;
     const effectiveHookEvent = pendingNewUserTurn && lifecycleMs <= effectivePrevTurnEndMs ? null : lifecycleEvent;
-    const hasBgTaskRunning = !turnFinished && effectiveHookEvent === 'Stop' && lifecycle?.fullyIdle === false;
+    const hasBgTaskRunning = !turnFinished && (hasRunningBgTasks || (effectiveHookEvent === 'Stop' && lifecycle?.fullyIdle === false));
     const mainWaitingOnSubagents = hasRunningSubagents && (!lsRunning || effectiveHookEvent === 'Stop' || tState.lastStepFinished);
+    const mainWaitingOnBgTasks = hasRunningBgTasks && !hasRunningSubagents && !lsRunning && hostGenerating !== true && (tState.lastStepFinished || effectiveHookEvent === 'Stop');
     const waitingOnBoard = !pendingNewUserTurn && tState.waitingOnBoard === true;
 
     let status = 'idle';
@@ -225,14 +240,15 @@ export class TaskMonitor {
     let headline = '待命';
 
     if (inActiveTurn) {
-      const threshold = waitingOnBoard
+      const threshold = (waitingOnBoard || mainWaitingOnBgTasks)
         ? BOARD_WAIT_STALL_SEC
         : (effectiveHookEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
       const hasSubagentTelemetry = subagentActivityMs > 0 || (cascadeState?.runningSubagentIds?.length || 0) > 0;
-      const canMeasureStall = !mainWaitingOnSubagents || hasSubagentTelemetry;
+      const canMeasureStall = (!mainWaitingOnSubagents || hasSubagentTelemetry) && (!mainWaitingOnBgTasks || Boolean(latestTask) || activeBgTaskMs > 0);
       if (canMeasureStall && silenceSec >= threshold) {
         isStalled = true;
         status = 'stalled';
+        const bgName = latestTask?.name || activeBgTasks[activeBgTasks.length - 1]?.id?.split('/').pop() || 'task';
         stalledReason = waitingOnBoard
           ? `等待子代理看板消息已连续 ${silenceSec} 秒无回复`
           : mainWaitingOnSubagents
@@ -240,7 +256,7 @@ export class TaskMonitor {
           : effectiveHookEvent === 'PreToolUse'
             ? `工具 [${hookToolName || 'tool'}] 已连续 ${silenceSec} 秒无响应`
             : hasBgTaskRunning
-              ? `后台任务 [${latestTask?.name || 'task'}] 已连续 ${silenceSec} 秒无输出`
+              ? `后台任务 [${bgName}] 已连续 ${silenceSec} 秒无输出`
               : `模型思考已连续 ${silenceSec} 秒无新响应`;
         headline = (mainWaitingOnSubagents || waitingOnBoard) ? `⚠️ 子代理疑似卡住 (${silenceSec}s)` : `⚠️ 疑似卡住 (${silenceSec}s)`;
       } else if (waitingOnBoard && !hasRunningSubagents) {
@@ -251,6 +267,12 @@ export class TaskMonitor {
         headline = subagentProbe.latestAction
           ? `🔄 ${runningSubagentCount} 个子代理运行中 · ${subagentProbe.latestAction}`
           : `🔄 ${runningSubagentCount} 个子代理运行中`;
+      } else if (mainWaitingOnBgTasks) {
+        status = 'running';
+        const activeName = latestTask?.name || activeBgTasks[activeBgTasks.length - 1]?.id?.split('/').pop() || '';
+        headline = activeName
+          ? `⚙️ ${runningBgTaskCount} 个后台任务运行中 · ${activeName}`
+          : `⚙️ ${runningBgTaskCount} 个后台任务运行中`;
       } else if (effectiveHookEvent === 'PreToolUse') {
         status = 'running';
         const act = this.formatToolAction(hookToolName, hookToolArgs);
@@ -319,7 +341,7 @@ export class TaskMonitor {
       } else {
         baseSteps = activeTranscriptSteps.map(s => ({ ...s }));
       }
-    } else if (activeTurnToolSteps.length > 0 || (inActiveTurn && (effectiveHookEvent === 'PreToolUse' || hasRunningSubagents))) {
+    } else if (activeTurnToolSteps.length > 0 || (inActiveTurn && (effectiveHookEvent === 'PreToolUse' || hasRunningSubagents || hasRunningBgTasks))) {
       // 自动使用本轮真实调用过的工具生成 Claude 风格步骤轨
       const toolItems = activeTurnToolSteps.slice(-6).map((title, idx) => ({
         id: idx + 1,
@@ -332,6 +354,12 @@ export class TaskMonitor {
           ? `子代理协同中（${runningSubagentCount}）：${subagentProbe.latestAction}`
           : `等待 ${runningSubagentCount} 个子代理完成协同任务`;
         toolItems.push({ id: toolItems.length + 1, title: subTitle, status: isStalled ? 'stalled' : 'running', percent: 50 });
+      } else if (inActiveTurn && mainWaitingOnBgTasks) {
+        const activeName = activeBgTasks[activeBgTasks.length - 1]?.id?.split('/').pop() || latestTask?.name || '';
+        const bgTitle = activeName
+          ? `后台任务运行中（${activeName}）`
+          : `等待 ${runningBgTaskCount} 个后台任务运行完成`;
+        toolItems.push({ id: toolItems.length + 1, title: bgTitle, status: isStalled ? 'stalled' : 'running', percent: 50 });
       } else if (inActiveTurn && effectiveHookEvent === 'PreToolUse') {
         const curAction = this.formatToolAction(hookToolName, hookToolArgs);
         if (curAction) {
@@ -349,10 +377,10 @@ export class TaskMonitor {
         toolItems.push({ id: toolItems.length + 1, title: '完成验证并输出结果', status: 'pending', percent: 0 });
       }
       baseSteps = toolItems.slice(0, 8).map((s, idx) => ({ ...s, id: idx + 1 }));
-      hasRealSteps = activeTurnToolSteps.length >= 2 || (activeTurnToolSteps.length >= 1 && inActiveTurn) || hasRunningSubagents;
+      hasRealSteps = activeTurnToolSteps.length >= 2 || (activeTurnToolSteps.length >= 1 && inActiveTurn) || hasRunningSubagents || hasRunningBgTasks;
     }
 
-    // 关键不变量：只要本轮仍在运行（含子代理运行中），步骤列表绝不能全部渲染为 completed
+    // 关键不变量：只要本轮仍在运行（含子代理或后台任务运行中），步骤列表绝不能全部渲染为 completed
     if (inActiveTurn && baseSteps.length > 0) {
       const hasActiveStep = baseSteps.some(s => s.status === 'running' || s.status === 'stalled');
       if (!hasActiveStep) {
@@ -370,6 +398,25 @@ export class TaskMonitor {
             status: isStalled ? 'stalled' : 'running',
             percent: 50
           });
+        } else if (hasRunningBgTasks && baseSteps.length < 8) {
+          const activeName = activeBgTasks[activeBgTasks.length - 1]?.id?.split('/').pop() || latestTask?.name || '';
+          const bgTitle = activeName
+            ? `后台任务运行中（${activeName}）`
+            : `等待 ${runningBgTaskCount} 个后台任务运行完成`;
+          baseSteps.push({
+            id: baseSteps.length + 1,
+            title: bgTitle,
+            status: isStalled ? 'stalled' : 'running',
+            percent: 50
+          });
+          if (baseSteps.length < 8) {
+            baseSteps.push({
+              id: baseSteps.length + 1,
+              title: '等待任务完成并汇总结果',
+              status: 'pending',
+              percent: 0
+            });
+          }
         } else {
           const lastIdx = baseSteps.length - 1;
           baseSteps[lastIdx] = {
@@ -430,9 +477,11 @@ export class TaskMonitor {
       : (effectiveHookEvent || (pendingNewUserTurn ? 'PreInvocation' : null));
     const dataSource = hasRunningSubagents
       ? `subagents (${runningSubagentCount}) · transcript`
-      : effectiveEvent
-        ? `hooks (${effectiveEvent}) · transcript`
-        : 'transcript.jsonl';
+      : hasRunningBgTasks
+        ? `tasks (${runningBgTaskCount}) · transcript`
+        : effectiveEvent
+          ? `hooks (${effectiveEvent}) · transcript`
+          : 'transcript.jsonl';
 
     const effectiveLatestTask = !turnFinished
       ? (latestTask
@@ -451,7 +500,16 @@ export class TaskMonitor {
                 : `${runningSubagentCount} 个子代理正在后台并行推进`,
               elapsed: silenceSec
             }
-          : null)
+          : hasRunningBgTasks
+            ? {
+                name: `${runningBgTaskCount} 个后台任务运行中`,
+                isDone: false,
+                lastLine: activeBgTasks[activeBgTasks.length - 1]?.description
+                  ? this.truncateClean(activeBgTasks[activeBgTasks.length - 1].description, 72)
+                  : `${runningBgTaskCount} 个后台命令仍在持续执行中`,
+                elapsed: silenceSec
+              }
+            : null)
       : null;
 
     return {
@@ -655,7 +713,8 @@ export class TaskMonitor {
         prevTurnEndMs: 0,
         lastErrorMs: 0,
         lastStepFinished: true,
-        waitingOnBoard: false
+        waitingOnBoard: false,
+        runningBgTasks: new Map()
       };
     }
 
@@ -669,6 +728,7 @@ export class TaskMonitor {
         cache.planStepIdx = -1;
         cache.modelStepsAfterPlan = 0;
         cache.waitingOnBoard = false;
+        cache.runningBgTasks.clear();
       }
 
       if (st.size > cache.lastSize) {
@@ -747,9 +807,23 @@ export class TaskMonitor {
           continue;
         }
 
-        // 子代理（Subagent / Swarm Worker）的首条输入往往是 SYSTEM_MESSAGE 或非 USER_EXPLICIT 的 USER_INPUT；同时主会话收到子代理回调 SYSTEM_MESSAGE 时代表本轮重新唤醒继续推进
+        // 子代理（Subagent / Swarm Worker）的首条输入往往是 SYSTEM_MESSAGE 或非 USER_EXPLICIT 的 USER_INPUT；同时主会话收到子代理回调或后台任务完成通知
         if (step.type === 'SYSTEM_MESSAGE' || (step.type === 'USER_INPUT' && step.source !== 'USER_EXPLICIT')) {
           cache.waitingOnBoard = false;
+          const sysContent = String(step.content || '');
+          if (step.type === 'SYSTEM_MESSAGE') {
+            if (/\[Notice\]\s*All your subagents and background tasks have been stopped/i.test(sysContent)) {
+              cache.runningBgTasks.clear();
+            } else {
+              for (const m of sysContent.matchAll(/Task id\s+"([^"]+)"\s+finished/gi)) {
+                cache.runningBgTasks.delete(m[1].trim());
+              }
+              if (/finished with result:/i.test(sysContent)) {
+                const senderMatch = sysContent.match(/sender=([^\s\]]+)/i);
+                if (senderMatch) cache.runningBgTasks.delete(senderMatch[1].trim());
+              }
+            }
+          }
           if (cache.turnStepIdx === -1 && stepIdx >= 0) {
             cache.turnStepIdx = stepIdx;
             cache.turnStartMs = stepTs || now;
@@ -760,7 +834,7 @@ export class TaskMonitor {
               if (subGoal) cache.objective = subGoal;
             }
           } else if (cache.turnStepIdx >= 0 && stepIdx > cache.turnStepIdx) {
-            const isHostNotice = step.type === 'SYSTEM_MESSAGE' && /^\s*(?:The following is a <SYSTEM_MESSAGE>[\s\S]*?)?\[Notice\]/i.test(step.content || '');
+            const isHostNotice = step.type === 'SYSTEM_MESSAGE' && /^\s*(?:The following is a <SYSTEM_MESSAGE>[\s\S]*?)?\[Notice\]/i.test(sysContent);
             if (!isHostNotice) {
               cache.lastStepFinished = false;
               cache.turnEndMs = 0;
@@ -769,10 +843,35 @@ export class TaskMonitor {
           continue;
         }
 
+        if (step.source === 'MODEL' && step.type === 'GENERIC') {
+          const genContent = String(step.content || '');
+          const bgMatch = genContent.match(/Tool is running as a background task with task id:\s*([^\s\n]+)/i);
+          if (bgMatch && step.status !== 'DONE') {
+            const taskId = bgMatch[1].trim();
+            const descMatch = genContent.match(/Task Description:\s*([^\n]+)/i);
+            cache.runningBgTasks.set(taskId, {
+              id: taskId,
+              startedAtMs: stepTs || now,
+              description: descMatch ? descMatch[1].trim() : ''
+            });
+          }
+          continue;
+        }
+
         if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE') {
           const toolCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
           const hasTools = toolCalls.length > 0;
           cache.waitingOnBoard = toolCalls.some(tc => BOARD_WAIT_TOOLS.has(tc?.name));
+          for (const tc of toolCalls) {
+            if (tc?.name === 'manage_task' && tc?.args?.Action === 'kill' && tc?.args?.TaskId) {
+              const rawKillId = String(tc.args.TaskId).trim();
+              for (const existingId of Array.from(cache.runningBgTasks.keys())) {
+                if (existingId === rawKillId || existingId.endsWith(`/${rawKillId}`)) {
+                  cache.runningBgTasks.delete(existingId);
+                }
+              }
+            }
+          }
 
           if (!hasTools && step.status === 'DONE') {
             cache.lastStepFinished = true;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.5 — 2026-11-16
+
+- **修复后台异步任务仍在运行（`1 task running`）时任务看板误判为全部完成的 Bug**：
+  - 在 `compat/inline-widget.cjs` 中新增对宿主 DOM 底部 `1 task running` / `N tasks running` / `个任务运行中` 状态条的实时扫描，通过 `domRunningTasks` 经 `runtime-ui.mjs` 与 `main.mjs` 传入 `TaskMonitor`。
+  - 在 `sidecars/panel/task-monitor.mjs` 中新增对 `transcript.jsonl` 异步后台任务（`Tool is running as a background task with task id: ...` 启动、`Task id "..." finished` / `manage_task kill` / `[Notice]` 停止）的跨轮次追踪；只要仍有后台任务在执行，状态保持为 `running`、追加运行中后台任务步骤且进度保持 `< 100%`，并采用 30 分钟长任务阈值避免 3 分钟误报卡死。
+
 ## 0.9.4 — 2026-11-16
 
 - **修复已完成对话误判卡死与展示距上次完成秒数的 Bug**：

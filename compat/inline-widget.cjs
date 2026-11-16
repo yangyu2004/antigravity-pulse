@@ -19,7 +19,7 @@ module.exports = function installAgPulseInlineWidget() {
   // /c/<id> URL, and must never inherit the desktop's conversation fallback.
   const surface=window.__agPulseSurface;
   const setMarkup=(element,markup)=>{if(surface?.setMarkup)surface.setMarkup(element,markup);else element.innerHTML=markup;};
-  let node=null,root=null,data=null,pending=false,cardName=null,hoverTimer=null,openTimer=null,warmUntil=0,lastConversation=null,conversationSwitchedAt=0,lastHostGenerating=null,lastDomSubagents=0,lastFetch=0,lastExpiredRefresh=0,resizeObserver=null,groupMenu=null,themeController=null,changingCards=false;
+  let node=null,root=null,data=null,pending=false,cardName=null,hoverTimer=null,openTimer=null,warmUntil=0,lastConversation=null,conversationSwitchedAt=0,lastHostGenerating=null,lastDomSubagents=0,lastDomTasks=0,lastFetch=0,lastExpiredRefresh=0,resizeObserver=null,groupMenu=null,themeController=null,changingCards=false;
   const HOVER_DELAY=250,WARM_WINDOW=350,LEAVE_DELAY=120;
   const isWarm=()=>Boolean(cardName||Date.now()<warmUntil);
   let chosen=localGet('ag-pulse-group'),group=null;
@@ -126,7 +126,7 @@ module.exports = function installAgPulseInlineWidget() {
   function syncConversation(){
     const id=conversationId();
     if(id===lastConversation)return false;
-    lastConversation=id;conversationSwitchedAt=Date.now();lastHostGenerating=null;lastDomSubagents=0;
+    lastConversation=id;conversationSwitchedAt=Date.now();lastHostGenerating=null;lastDomSubagents=0;lastDomTasks=0;
     requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
     stopDensityMotion();densityFrame=null;densityProbe=null;
     manualRequest=null;refreshBusy(false);clearInlineChatCards();resetTaskProgressDom();
@@ -811,39 +811,49 @@ module.exports = function installAgPulseInlineWidget() {
     }
     return out.replace(/\s+/g,' ').trim();
   }
-  function countDomRunningSubagents(){
-    if(composer?.kind==='subagent')return 0;
+  function countDomRunningIndicators(){
+    if(composer?.kind==='subagent')return {subagents:0,tasks:0};
     const convScope=composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||document.querySelector('[data-testid="conversation-view"]');
-    if(!convScope)return 0;
+    if(!convScope)return {subagents:0,tasks:0};
     const checkSet=[];
     const responses=convScope.querySelectorAll('[data-testid="agent-response"]');
-    for(let i=Math.max(0,responses.length-2);i<responses.length;i++){
+    for(let i=Math.max(0,responses.length-4);i<responses.length;i++){
       const all=responses[i].querySelectorAll('span,div,button');
-      for(let j=Math.max(0,all.length-50);j<all.length;j++)checkSet.push(all[j]);
+      for(let j=Math.max(0,all.length-80);j<all.length;j++)checkSet.push(all[j]);
     }
     for(const child of convScope.children){
       if(child===composer?.box||child.contains?.(composer?.box)||child.matches?.('[data-testid="subagent-tab-conversation"]'))continue;
       if(!child.querySelector?.('[data-testid="agent-response"]')){
         const els=child.querySelectorAll?.('span,div,button')||[];
-        for(let k=0;k<Math.min(els.length,40);k++)checkSet.push(els[k]);
+        for(let k=0;k<Math.min(els.length,60);k++)checkSet.push(els[k]);
       }
     }
-    let maxCount=0;
+    let subagents=0,tasks=0;
     for(const el of checkSet){
       if(!el?.isConnected||el.childElementCount>3||el.closest('pre,code,[contenteditable="true"],[hidden],[inert],[data-testid="subagent-tab-conversation"],#ag-pulse-status-bar,.ag-pulse-inline-chat-host'))continue;
       const raw=extractElementDirectText(el);
       if(!raw||raw.length>48)continue;
-      const mEn=raw.match(/^(\d+)\s+subagents?\s+running$/i);
-      const mZh=raw.match(/^(\d+)\s*个?(?:子代理|子智能体|代理)(?:正在)?(?:运行|执行)中?$/);
-      if(mEn||mZh){
-        if(visibleHostElement(el))maxCount=Math.max(maxCount,Number((mEn||mZh)[1])||1);
-      }else if(/^(?:subagent\s+running|子代理正在运行|子智能体运行中)$/i.test(raw)&&visibleHostElement(el)){
-        maxCount=Math.max(maxCount,1);
+      const mSubEn=raw.match(/^(\d+)\s+subagents?\s+running$/i);
+      const mSubZh=raw.match(/^(\d+)\s*个?(?:子代理|子智能体|代理)(?:正在)?(?:运行|执行)中?$/);
+      if(mSubEn||mSubZh){
+        if(visibleHostElement(el))subagents=Math.max(subagents,Number((mSubEn||mSubZh)[1])||1);
+        continue;
+      }
+      if(/^(?:subagent\s+running|子代理正在运行|子智能体运行中)$/i.test(raw)&&visibleHostElement(el)){
+        subagents=Math.max(subagents,1);
+        continue;
+      }
+      const mTaskEn=raw.match(/^(\d+)\s+(?:background\s+)?tasks?\s+running$/i);
+      const mTaskZh=raw.match(/^(\d+)\s*个?(?:后台)?任务(?:正在)?(?:运行|执行)中?$/);
+      if(mTaskEn||mTaskZh){
+        if(visibleHostElement(el))tasks=Math.max(tasks,Number((mTaskEn||mTaskZh)[1])||1);
+      }else if(/^(?:(?:background\s+)?task\s+running|(?:后台)?任务(?:正在)?(?:运行|执行)中?)$/i.test(raw)&&visibleHostElement(el)){
+        tasks=Math.max(tasks,1);
       }
     }
-    return maxCount;
+    return {subagents,tasks};
   }
-  function isHostGenerating(domSubagents=countDomRunningSubagents()){
+  function isHostGenerating(domSubagents=countDomRunningIndicators().subagents){
     const box=composer?.box;
     if(!box||!visibleHostElement(box))return null;
     if(findCancelButton(box))return true;
@@ -852,20 +862,24 @@ module.exports = function installAgPulseInlineWidget() {
     return box.querySelector('[contenteditable="true"]')?false:null;
   }
   function syncOptimisticRunningState(){
-    const domSub=countDomRunningSubagents();
+    const {subagents:domSub,tasks:domTasks}=countDomRunningIndicators();
     const gen=isHostGenerating(domSub);
-    if(gen===true&&data?.taskProgress&&(data.taskProgress.status==='completed'||data.taskProgress.status==='idle')){
-      const headline=domSub>0?`🔄 ${domSub} 个子代理运行中`:'🤔 思考规划中 (0s)';
+    if((gen===true||domTasks>0)&&data?.taskProgress&&(data.taskProgress.status==='completed'||data.taskProgress.status==='idle')){
+      const headline=domSub>0?`🔄 ${domSub} 个子代理运行中`:(domTasks>0?`⚙️ ${domTasks} 个后台任务运行中`:'🤔 思考规划中 (0s)');
       data.taskProgress={
         ...data.taskProgress,
         status:'running',
-        progressPercent:domSub>0?Math.min(90,Math.max(25,data.taskProgress.progressPercent||50)):15,
+        progressPercent:domSub>0||domTasks>0?Math.min(90,Math.max(25,data.taskProgress.progressPercent||50)):15,
         headline,
         isStalled:false,
         stalledDuration:0,
         showInlineCard:false,
-        turnStepIdx:Number.isFinite(data.taskProgress.turnStepIdx)?data.taskProgress.turnStepIdx+1:-1,
-        steps:[
+        turnStepIdx:gen===true&&Number.isFinite(data.taskProgress.turnStepIdx)?data.taskProgress.turnStepIdx+1:(data.taskProgress.turnStepIdx??-1),
+        steps:domTasks>0?[
+          {id:1,title:'已派发并启动后台命令任务',status:'completed',percent:100},
+          {id:2,title:`等待 ${domTasks} 个后台任务运行完成`,status:'running',percent:50},
+          {id:3,title:'等待任务完成并汇总结果',status:'pending',percent:0},
+        ]:[
           {id:1,title:'接收指令与上下文准备',status:'completed',percent:100},
           {id:2,title:domSub>0?`等待 ${domSub} 个子代理完成协同任务`:'思考规划执行方案',status:'running',percent:50},
           {id:3,title:'整理结果并完成交付',status:'pending',percent:0},
@@ -1263,11 +1277,11 @@ module.exports = function installAgPulseInlineWidget() {
     const epoch=requestEpoch;
     const current=()=>!disposed&&epoch===requestEpoch&&conversation===conversationId()&&conversation===lastConversation&&node?.isConnected;
     pending=true;lastFetch=Date.now();
-    const domRunningSubagents=countDomRunningSubagents();
+    const {subagents:domRunningSubagents,tasks:domRunningTasks}=countDomRunningIndicators();
     const hostGenerating=isHostGenerating(domRunningSubagents);
-    lastHostGenerating=hostGenerating;lastDomSubagents=domRunningSubagents;
+    lastHostGenerating=hostGenerating;lastDomSubagents=domRunningSubagents;lastDomTasks=domRunningTasks;
     refreshRequest=(async()=>{
-      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(domRunningSubagents>0?{domRunningSubagents}:{}),...(syncUsage?{usageSync:true}:{})});if(!current())return;node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
+      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(domRunningSubagents>0?{domRunningSubagents}:{}),...(domRunningTasks>0?{domRunningTasks}:{}),...(syncUsage?{usageSync:true}:{})});if(!current())return;node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
       catch{if(current()&&data){data.connection='stale';data.error=t('reconnecting');render();}}
       finally{if(epoch===requestEpoch){pending=false;refreshRequest=null;}}
     })();
@@ -1281,8 +1295,8 @@ module.exports = function installAgPulseInlineWidget() {
   densityMedia.addEventListener('change',stopDensityMotion);
   const timerId=setInterval(()=>{
     mount();fit();tick();position();
-    const curSub=countDomRunningSubagents(),curGen=isHostGenerating(curSub);
-    const stateFlipped=(curGen!==lastHostGenerating&&curGen!==null)||curSub!==lastDomSubagents;
+    const {subagents:curSub,tasks:curTasks}=countDomRunningIndicators(),curGen=isHostGenerating(curSub);
+    const stateFlipped=(curGen!==lastHostGenerating&&curGen!==null)||curSub!==lastDomSubagents||curTasks!==lastDomTasks;
     if(stateFlipped){syncOptimisticRunningState();refresh(true);return;}
     if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:800))refresh();
   },600);
