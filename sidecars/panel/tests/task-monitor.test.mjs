@@ -289,3 +289,64 @@ test('task board steps are strictly read-only and driven solely by real-time AI 
   assert.equal(typeof monitor.setSteps, 'undefined', 'Manual setSteps must not exist');
   assert.equal('customSteps' in monitor, false, 'Manual customSteps override map must not exist');
 });
+
+test('completed conversation from days ago never shows elapsed silence as stalled on open or new turn start', async () => {
+  const brainRoot = await mkdtemp(join(tmpdir(), 'pulse-tm-old-'));
+  try {
+    const now = Date.now();
+    const threeDaysAgo = now - 247_226_000;
+
+    // 1. 3 天前已完成对话（带总结列表），且宿主又附加了 [Notice] 系统消息、language server summaries 中无此旧会话记录
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(threeDaysAgo - 20_000).toISOString(), content: '<USER_REQUEST>\n检查待办事项\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(threeDaysAgo).toISOString(), content: '1. 已测通（第 13、12 项）\n2. 功能已过（第 9、10 项）\n3. 核心已过（第 6、11 项）', tool_calls: [] },
+        { step_index: 2, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date(now - 600_000).toISOString(), content: '[Notice] All your subagents and background tasks have been stopped due to server restart.' },
+      ],
+      transcriptMtimeMs: threeDaysAgo,
+      lifecycle: { event: 'Stop', timestampMs: threeDaysAgo + 500, fullyIdle: true, terminationReason: 'NO_TOOL_CALL', conversationId: ROOT_ID },
+    });
+
+    const monitor = new TaskMonitor({ brainRoot });
+    // 打开旧会话（包含刚切入会话 hostGenerating=null 的 2.5s 防抖窗口、以及 hostGenerating=false）
+    for (const hostGenerating of [null, false]) {
+      const idleSnap = await monitor.snapshot(ROOT_ID, {
+        hostGenerating,
+        cascadeState: { selfStatus: null, selfRunning: false, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: 0, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+      });
+      assert.equal(idleSnap.status, 'completed');
+      assert.equal(idleSnap.isStalled, false);
+      assert.equal(idleSnap.stalledDuration, 0);
+      assert.ok(idleSnap.steps.every(s => s.status === 'completed'));
+    }
+
+    // 2. 用户在 3 天后的现在输入追问并点击发送（hostGenerating=true 在 PreInvocation 写入前先行到达）
+    const startSnap = await monitor.snapshot(ROOT_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: null, selfRunning: false, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: 0, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(startSnap.status, 'running');
+    assert.equal(startSnap.isStalled, false, 'New turn must never inherit 247226s silence from previous finished turn');
+    assert.equal(startSnap.stalledDuration, 0);
+    assert.equal(startSnap.showInlineCard, false, 'Old turn summary steps must not mount into new turn Working bubble');
+    assert.ok(startSnap.elapsedSeconds <= 2, `Expected fresh elapsedSeconds <= 2, got ${startSnap.elapsedSeconds}`);
+
+    // 3. 遗留异常中断的旧会话（PreToolUse 停在 3 天前，无 Stop 钩子）在未生成时也不能误报 247226s 卡死
+    await setupBrainConv(brainRoot, CHILD_A, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(threeDaysAgo - 10_000).toISOString(), content: '<USER_REQUEST>\n旧中断任务\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(threeDaysAgo).toISOString(), tool_calls: [{ name: 'run_command', args: { CommandLine: 'ls' } }] },
+      ],
+      transcriptMtimeMs: threeDaysAgo,
+      lifecycle: { event: 'PreToolUse', timestampMs: threeDaysAgo, toolCall: { name: 'run_command' }, conversationId: CHILD_A },
+    });
+    const staleHookSnap = await monitor.snapshot(CHILD_A, {
+      hostGenerating: false,
+      cascadeState: { selfStatus: null, selfRunning: false, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: 0, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.notEqual(staleHookSnap.status, 'stalled');
+    assert.equal(staleHookSnap.isStalled, false);
+  } finally {
+    await rm(brainRoot, { recursive: true, force: true });
+  }
+});

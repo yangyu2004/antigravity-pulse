@@ -863,6 +863,8 @@ module.exports = function installAgPulseInlineWidget() {
         headline,
         isStalled:false,
         stalledDuration:0,
+        showInlineCard:false,
+        turnStepIdx:Number.isFinite(data.taskProgress.turnStepIdx)?data.taskProgress.turnStepIdx+1:-1,
         steps:[
           {id:1,title:'接收指令与上下文准备',status:'completed',percent:100},
           {id:2,title:domSub>0?`等待 ${domSub} 个子代理完成协同任务`:'思考规划执行方案',status:'running',percent:50},

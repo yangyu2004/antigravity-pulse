@@ -14,6 +14,8 @@ export class TaskMonitor {
   constructor(options = {}) {
     this.brainRoot = options.brainRoot || join(homedir(), '.gemini', 'antigravity', 'brain');
     this.transcriptCache = new Map();
+    this.pendingTurnAnchors = new Map();
+    this.lastTurnFinished = new Map();
   }
 
   async snapshot(conversationId, { hostGenerating = null, domRunningSubagents = 0, cascadeState = null } = {}) {
@@ -47,24 +49,68 @@ export class TaskMonitor {
     // 2. 增量读取 transcript.jsonl
     const tState = await this.readTranscriptIncremental(id, transcriptPath, now);
 
-    // 检测“新一轮刚触发 PreInvocation，但 transcript.jsonl 尚未刷入新 USER_INPUT”的瞬态窗口，防止把上一轮已完成的看板闪出来
+    // 3. 提前读取语言服务权威状态与子代理活跃度，避免新一轮刚点击发送（hostGenerating=true / lsRunning=true）
+    //    在 PreInvocation/transcript 刷盘前的瞬态窗口把上一轮已完成的步骤与“距上次完成秒数”误判为当前卡死
+    const lsSubagentCount = Number.isSafeInteger(cascadeState?.runningSubagents) && cascadeState.runningSubagents > 0
+      ? cascadeState.runningSubagents
+      : 0;
+    const domSubagentCount = Number.isSafeInteger(domRunningSubagents) && domRunningSubagents > 0
+      ? domRunningSubagents
+      : 0;
+    const runningSubagentCount = Math.max(lsSubagentCount, domSubagentCount, cascadeState?.selfHasActiveChildren ? 1 : 0);
+    const hasRunningSubagents = runningSubagentCount > 0;
+    const subagentProbe = hasRunningSubagents
+      ? await this.probeSubagentsActivity(cascadeState?.runningSubagentIds || [])
+      : { latestMtimeMs: 0, latestAction: '' };
+
+    const lsRunning = cascadeState?.selfRunning === true;
+    const lsSettled = cascadeState?.selfSettled === true;
+    const hasLsSelfStatus = Boolean(cascadeState?.selfStatus);
+
+    // 检测“新一轮刚发起，但 transcript.jsonl 尚未刷入新 USER_INPUT”的瞬态窗口：
+    // 1) 上一轮已结束，现收到新 PreInvocation/PreToolUse 或宿主输入框进入生成态/语言服务转为运行态（且无旧子代理在跑）；
+    // 2) 此前已观测到该对话处于已结束状态，而现在宿主重新进入活跃生成态但日志尚未增长。
     const hookInputGoal = this.extractUserRequest(lifecycle?.lastUserInput || '');
-    const pendingNewUserTurn = Boolean(
-      tState.lastStepFinished &&
-      tState.turnEndMs > 0 &&
-      lifecycleEvent === 'PreInvocation' &&
+    const anchorKey = `${id}:${tState.turnStepIdx}:${tState.turnEndMs}:${tState.lastGrowthMs || 0}`;
+    const existingAnchor = this.pendingTurnAnchors.get(id);
+    const prevWasFinished = this.lastTurnFinished.get(id) === true;
+    const newHookAfterEnd = tState.lastStepFinished && tState.turnEndMs > 0 &&
+      ['PreInvocation', 'PreToolUse', 'PostToolUse'].includes(lifecycleEvent) &&
       lifecycleMs > tState.turnEndMs + 150 &&
-      ((hookInputGoal && hookInputGoal !== tState.lastUserInputGoal) ||
-       (lifecycle?.invocationNum === 0 && lifecycleMs > (tState.turnStartMs || 0) + 1500))
+      (
+        lifecycleEvent === 'PreInvocation' ||
+        (hookInputGoal && hookInputGoal !== tState.lastUserInputGoal) ||
+        (lifecycle?.invocationNum === 0 && lifecycleMs > (tState.turnStartMs || 0) + 1500) ||
+        lifecycleMs > tState.turnEndMs + 1500
+      );
+    const newHostStartAfterEnd = !hasRunningSubagents && (
+      hostGenerating === true ||
+      (lsRunning && (!tState.turnEndMs || (cascadeState?.selfModifiedMs || 0) > tState.turnEndMs + 1500))
+    ) && (
+      (tState.lastStepFinished && tState.turnEndMs > 0 && (now - tState.turnEndMs) > 1500) ||
+      (prevWasFinished && (now - Math.max(lifecycleMs, tState.lastGrowthMs || 0)) > 15000)
     );
-    const effectiveTurnStartMs = pendingNewUserTurn ? lifecycleMs : tState.turnStartMs;
+    const pendingNewUserTurn = Boolean(!hasRunningSubagents && (newHookAfterEnd || newHostStartAfterEnd));
+    let pendingAnchorMs = 0;
+    if (pendingNewUserTurn) {
+      if (existingAnchor && existingAnchor.key === anchorKey) {
+        pendingAnchorMs = existingAnchor.startedAtMs;
+      } else {
+        pendingAnchorMs = newHookAfterEnd && lifecycleMs > (tState.turnEndMs || 0) + 150 ? lifecycleMs : now;
+        this.pendingTurnAnchors.set(id, { key: anchorKey, startedAtMs: pendingAnchorMs });
+      }
+    } else if (existingAnchor) {
+      this.pendingTurnAnchors.delete(id);
+    }
+
+    const effectiveTurnStartMs = pendingNewUserTurn ? pendingAnchorMs : tState.turnStartMs;
     const effectivePrevTurnEndMs = pendingNewUserTurn
-      ? Math.max(tState.turnEndMs || 0, tState.prevTurnEndMs || 0)
+      ? Math.max(tState.turnEndMs || 0, tState.prevTurnEndMs || 0, tState.lastGrowthMs || 0)
       : (tState.prevTurnEndMs || 0);
     const activeTranscriptSteps = pendingNewUserTurn ? [] : tState.steps;
     const activeTurnToolSteps = pendingNewUserTurn ? [] : tState.turnToolSteps;
 
-    // 3. 读取可选的 scratch/task_steps.json（模型显式写入的精确步骤；严格隔离上一轮已完成旧文件）
+    // 4. 读取可选的 scratch/task_steps.json（模型显式写入的精确步骤；严格隔离上一轮已完成旧文件）
     let filePlan = null;
     try {
       const st = await stat(agentStepsPath);
@@ -80,23 +126,16 @@ export class TaskMonitor {
       }
     } catch {}
 
-    // 4. 融合语言服务权威轨迹状态 + 子代理（Subagent / Swarm）活跃状态 + 宿主输入框状态
-    const lsSubagentCount = Number.isSafeInteger(cascadeState?.runningSubagents) && cascadeState.runningSubagents > 0
-      ? cascadeState.runningSubagents
-      : 0;
-    const domSubagentCount = Number.isSafeInteger(domRunningSubagents) && domRunningSubagents > 0
-      ? domRunningSubagents
-      : 0;
-    const runningSubagentCount = Math.max(lsSubagentCount, domSubagentCount, cascadeState?.selfHasActiveChildren ? 1 : 0);
-    const hasRunningSubagents = runningSubagentCount > 0;
-    const subagentProbe = hasRunningSubagents
-      ? await this.probeSubagentsActivity(cascadeState?.runningSubagentIds || [])
-      : { latestMtimeMs: 0, latestAction: '' };
-
-    const lsRunning = cascadeState?.selfRunning === true;
-    const lsSettled = cascadeState?.selfSettled === true;
+    // 5. 判定本轮是否处于活跃状态（仅靠真实运行信号驱动，禁止对已结束/历史对话倒计时误报卡死）
     const activeHookEvent = ['PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation'].includes(lifecycleEvent) ||
       (lifecycleEvent === 'Stop' && lifecycle?.fullyIdle === false);
+    const stoppedByHook = !pendingNewUserTurn &&
+      lifecycleEvent === 'Stop' &&
+      lifecycle?.fullyIdle !== false &&
+      lifecycleMs >= (tState.lastGrowthMs || 0) - 1000 &&
+      !lsRunning &&
+      !hasRunningSubagents &&
+      hostGenerating !== true;
     const transcriptCompletedAfterHook = !pendingNewUserTurn &&
       tState.lastStepFinished &&
       tState.turnEndMs > 0 &&
@@ -107,19 +146,24 @@ export class TaskMonitor {
       !lsRunning &&
       !hasRunningSubagents &&
       hostGenerating !== true;
+    const activityAgeMs = now - Math.max(lifecycleMs, tState.lastGrowthMs || 0);
     const staleIdleHook = activeHookEvent &&
       !pendingNewUserTurn &&
       !lsRunning &&
       !hasRunningSubagents &&
-      hostGenerating === false && (
-        (lsSettled && (now - Math.max(lifecycleMs, tState.lastGrowthMs || 0)) > 2500) ||
-        (!cascadeState && tState.lastStepFinished && (now - Math.max(lifecycleMs, tState.lastGrowthMs || 0)) > 4000)
+      hostGenerating !== true && (
+        (lsSettled && activityAgeMs > 2500) ||
+        (!hasLsSelfStatus && tState.lastStepFinished && activityAgeMs > 4000) ||
+        (!hasLsSelfStatus && activityAgeMs > 15000) ||
+        (hostGenerating === false && activityAgeMs > 15000)
       );
     const unfinishedTranscriptActive = !pendingNewUserTurn &&
       !tState.lastStepFinished &&
       !lsSettled &&
       !abortedByError &&
-      !(!cascadeState && hostGenerating === false && (now - (tState.lastGrowthMs || 0)) > 4000);
+      !stoppedByHook &&
+      !(hostGenerating === false && !lsRunning && !hasRunningSubagents && (!hasLsSelfStatus ? activityAgeMs > 4000 : activityAgeMs > 15000)) &&
+      !(hostGenerating === null && !lsRunning && !hasRunningSubagents && !hasLsSelfStatus && activityAgeMs > 15000);
 
     const inActiveTurn = Boolean(
       hasRunningSubagents ||
@@ -130,6 +174,7 @@ export class TaskMonitor {
       unfinishedTranscriptActive
     );
     const turnFinished = !inActiveTurn;
+    this.lastTurnFinished.set(id, turnFinished);
 
     // 5. 仅扫描属于本轮对话（mtime >= effectiveTurnStartMs）的后台任务日志，彻底屏蔽历史旧日志
     let latestTask = null;
@@ -157,19 +202,21 @@ export class TaskMonitor {
     }
 
     // 6. 判定当前活跃动向与卡死状态（合并运行中子代理的最新心跳，避免主会话等待子代理时误报卡死）
-    const hasBgTaskRunning = !turnFinished && lifecycleEvent === 'Stop' && lifecycle?.fullyIdle === false;
     const subagentActivityMs = hasRunningSubagents
       ? Math.max(cascadeState?.latestRunningSubagentModifiedMs || 0, subagentProbe.latestMtimeMs || 0)
       : 0;
     const lastActivityMs = Math.max(
-      lifecycleMs,
-      tState.lastGrowthMs || 0,
+      pendingNewUserTurn ? pendingAnchorMs : 0,
+      lifecycleMs > effectivePrevTurnEndMs ? lifecycleMs : 0,
+      pendingNewUserTurn ? 0 : (tState.lastGrowthMs || 0),
       latestTask ? latestTask.mtimeMs : 0,
       lsRunning ? (cascadeState?.selfModifiedMs || 0) : 0,
       subagentActivityMs
     );
     const silenceSec = lastActivityMs > 0 ? Math.max(0, Math.round((now - lastActivityMs) / 1000)) : 0;
-    const mainWaitingOnSubagents = hasRunningSubagents && (!lsRunning || lifecycleEvent === 'Stop' || tState.lastStepFinished);
+    const effectiveHookEvent = pendingNewUserTurn && lifecycleMs <= effectivePrevTurnEndMs ? null : lifecycleEvent;
+    const hasBgTaskRunning = !turnFinished && effectiveHookEvent === 'Stop' && lifecycle?.fullyIdle === false;
+    const mainWaitingOnSubagents = hasRunningSubagents && (!lsRunning || effectiveHookEvent === 'Stop' || tState.lastStepFinished);
     const waitingOnBoard = !pendingNewUserTurn && tState.waitingOnBoard === true;
 
     let status = 'idle';
@@ -180,7 +227,7 @@ export class TaskMonitor {
     if (inActiveTurn) {
       const threshold = waitingOnBoard
         ? BOARD_WAIT_STALL_SEC
-        : (lifecycleEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
+        : (effectiveHookEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
       const hasSubagentTelemetry = subagentActivityMs > 0 || (cascadeState?.runningSubagentIds?.length || 0) > 0;
       const canMeasureStall = !mainWaitingOnSubagents || hasSubagentTelemetry;
       if (canMeasureStall && silenceSec >= threshold) {
@@ -190,7 +237,7 @@ export class TaskMonitor {
           ? `等待子代理看板消息已连续 ${silenceSec} 秒无回复`
           : mainWaitingOnSubagents
           ? `运行中的 ${runningSubagentCount} 个子代理已连续 ${silenceSec} 秒无新响应`
-          : lifecycleEvent === 'PreToolUse'
+          : effectiveHookEvent === 'PreToolUse'
             ? `工具 [${hookToolName || 'tool'}] 已连续 ${silenceSec} 秒无响应`
             : hasBgTaskRunning
               ? `后台任务 [${latestTask?.name || 'task'}] 已连续 ${silenceSec} 秒无输出`
@@ -204,7 +251,7 @@ export class TaskMonitor {
         headline = subagentProbe.latestAction
           ? `🔄 ${runningSubagentCount} 个子代理运行中 · ${subagentProbe.latestAction}`
           : `🔄 ${runningSubagentCount} 个子代理运行中`;
-      } else if (lifecycleEvent === 'PreToolUse') {
+      } else if (effectiveHookEvent === 'PreToolUse') {
         status = 'running';
         const act = this.formatToolAction(hookToolName, hookToolArgs);
         const subSuffix = hasRunningSubagents ? ` · ${runningSubagentCount} 子代理` : '';
@@ -272,7 +319,7 @@ export class TaskMonitor {
       } else {
         baseSteps = activeTranscriptSteps.map(s => ({ ...s }));
       }
-    } else if (activeTurnToolSteps.length > 0 || (inActiveTurn && (lifecycleEvent === 'PreToolUse' || hasRunningSubagents))) {
+    } else if (activeTurnToolSteps.length > 0 || (inActiveTurn && (effectiveHookEvent === 'PreToolUse' || hasRunningSubagents))) {
       // 自动使用本轮真实调用过的工具生成 Claude 风格步骤轨
       const toolItems = activeTurnToolSteps.slice(-6).map((title, idx) => ({
         id: idx + 1,
@@ -285,7 +332,7 @@ export class TaskMonitor {
           ? `子代理协同中（${runningSubagentCount}）：${subagentProbe.latestAction}`
           : `等待 ${runningSubagentCount} 个子代理完成协同任务`;
         toolItems.push({ id: toolItems.length + 1, title: subTitle, status: isStalled ? 'stalled' : 'running', percent: 50 });
-      } else if (inActiveTurn && lifecycleEvent === 'PreToolUse') {
+      } else if (inActiveTurn && effectiveHookEvent === 'PreToolUse') {
         const curAction = this.formatToolAction(hookToolName, hookToolArgs);
         if (curAction) {
           if (!toolItems.length || toolItems[toolItems.length - 1].title !== curAction) {
@@ -378,9 +425,9 @@ export class TaskMonitor {
       elapsedSeconds = Math.max(0, Math.round((endRef - effectiveTurnStartMs) / 1000));
     }
 
-    const effectiveEvent = turnFinished && ['PreInvocation', 'PreToolUse'].includes(lifecycleEvent)
+    const effectiveEvent = turnFinished && ['PreInvocation', 'PreToolUse'].includes(effectiveHookEvent)
       ? 'Idle'
-      : lifecycleEvent;
+      : (effectiveHookEvent || (pendingNewUserTurn ? 'PreInvocation' : null));
     const dataSource = hasRunningSubagents
       ? `subagents (${runningSubagentCount}) · transcript`
       : effectiveEvent
@@ -713,8 +760,11 @@ export class TaskMonitor {
               if (subGoal) cache.objective = subGoal;
             }
           } else if (cache.turnStepIdx >= 0 && stepIdx > cache.turnStepIdx) {
-            cache.lastStepFinished = false;
-            cache.turnEndMs = 0;
+            const isHostNotice = step.type === 'SYSTEM_MESSAGE' && /^\s*(?:The following is a <SYSTEM_MESSAGE>[\s\S]*?)?\[Notice\]/i.test(step.content || '');
+            if (!isHostNotice) {
+              cache.lastStepFinished = false;
+              cache.turnEndMs = 0;
+            }
           }
           continue;
         }

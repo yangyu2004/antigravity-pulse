@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4 — 2026-11-16
+
+- **修复已完成对话误判卡死与展示距上次完成秒数的 Bug**：
+  - 修复 `sidecars/panel/task-monitor.mjs` 在旧对话已完成后（如几天前已完成）新发起追问、或打开带 `[Notice]` 系统通知 / 遗留钩子的已完成会话时，`pendingNewUserTurn` 未及时触发或 `!cascadeState` 误把 `{ selfStatus: null }` 当作非空状态，导致把上一轮已完成步骤与「距上次完成时间（如数十万秒）」误判为当前轮卡死倒计时的问题。
+  - 新增 `pendingTurnAnchors` 新轮起始时间锚点，确保新发起回合秒级归零计时并忽略旧轮步骤；将 `Stop (fullyIdle)` 与宿主 `[Notice]` 系统消息纳入完成态判定。
+  - 修复 `compat/inline-widget.cjs` 的 `syncOptimisticRunningState()`，在乐观切换为运行态时重置 `showInlineCard` 并递增 `turnStepIdx`，避免将上一轮已完成卡片冻结挂载进新气泡的 `Working` 状态。
+
 ## 0.9.3 — 2026-11-15
 
 - **Antigravity 2.32.1 客户端适配**：全面验证在 macOS 最新版 Antigravity 桌面客户端（v2.32.1，Electron 26.5.0，Chromium 152.0.7977.167）下的运行表现。CDP loopback 注入通道、状态栏全指标监控、Claude 风格只读步骤卡片、90+ 历史会话恢复及防卡死唤醒机制均实机验证通过。
