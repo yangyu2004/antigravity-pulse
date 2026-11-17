@@ -21,10 +21,10 @@ const store=new MetricsStore(client,{history:new SessionHistory(join(data,'histo
 const usage=new LocalUsage(store,new UsageLedger(join(data,'usage-v1'),{source:'ide-local'}),{host:'ide',owns:()=>ownership.owns()});
 store.onTrajectory=async(scope,id,raw)=>{if(await ownership.isOwner())await usage.ingest(scope,id,raw);};
 const preferences=new PreferencesStore({file:join(data,'preferences.json')});
-const files=await Promise.all(['compat/i18n.cjs','compat/inline-widget.cjs','compat/theme.cjs','ide/surface.cjs','compat/usage-ui.cjs'].map(f=>readFile(join(root,f),'utf8')));
+const files=await Promise.all(['compat/i18n.cjs','compat/inline-widget.cjs','compat/theme.cjs','ide/surface.cjs','compat/usage-ui.cjs','compat/host-i18n.cjs'].map(f=>readFile(join(root,f),'utf8')));
 const extract=s=>s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'');
 if(!await ownership.claim())process.exit(0);
-const usageSource=`window.__agPulseUsageFactory=(${extract(files[4])});`;
+const usageSource=`window.__agPulseUsageFactory=(${extract(files[4])});window.__agPulseHostI18nFactory=(${extract(files[5])});`;
 const owner=ownership.token,source=makeRendererSource(...files.slice(0,3),owner,ownership.startedAt,usageSource);
 const adapter=`window.__agPulseSurface=(${extract(files[3])})();`;
 // Each workbench has its own bridge request ID and DOM conversation ID. Empty

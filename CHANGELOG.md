@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.7 — 2026-11-17
+
+- 新增非侵入式宿主界面汉化引擎（`compat/host-i18n.cjs`）：复用插件现有 CDP 运行时注入通道动态翻译 Antigravity 2.32.1 桌面端及 IDE 原生英文 UI（侧边栏、设置页、权限预设、弹窗、计时文本与动态占位符等 600+ 词条及动态正则），全程不修改 `app.asar`，避免触发客户端完整性校验。
+- 汉化开关与插件语言偏好自动联动：切换至简体中文（`zh-CN`）或繁体中文（`zh-TW`，支持实时简繁转换）时启用宿主界面汉化，切换回英文（`en`）或注销面板时基于 `WeakMap` 原始值缓存无损还原客户端原生英文文本。
+- 安全区域精准隔离：自动跳过插件自身 DOM、代码块（`pre`/`code`/`.monaco-editor`/`.xterm`）、消息正文（`.prose`/`.markdown`/`[data-testid="user-message"]`）与模型选择器标题（`[data-testid="model-selector-trigger"]`），保持模型配额分组与取消/后台任务状态识别稳定不受影响。
+- 独立 IDE VSIX（`ide/main.mjs`、`ide/package.py`）与发布校验脚本（`tools/publish-release.py`）同步打包并校验 `compat/host-i18n.cjs`。
+
 ## 0.9.6 — 2026-11-16
 
 - **修复定时器条件取消 / 任务清空后仍显示「后台任务运行中」的 Bug**：

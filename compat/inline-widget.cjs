@@ -11,6 +11,7 @@ module.exports = function installAgPulseInlineWidget() {
   const localSet=(key,value)=>{try{localStorage.setItem(key,value);}catch{}};
   const language=window.__agPulseI18nFactory(localGet('ag-pulse-language'));
   const theme=window.__agPulseThemeFactory();
+  const hostTranslator=window.__agPulseHostI18nFactory?window.__agPulseHostI18nFactory({enabled:language.language==='zh-CN'||language.language==='zh-TW',language:language.language}):null;
   const t=language.t;
   window.__agPulseInlineInstalled=true;
   report('boot',{hostFound:true});
@@ -26,7 +27,7 @@ module.exports = function installAgPulseInlineWidget() {
   let refreshRequest=null,manualRequest=null,requestEpoch=0,disposed=false;
   let composer=null,layoutFrame=null;
   let usageDashboard=null,updateMenu=null;
-  let densityFrame=null,densityMotion=null,densityProbe=null;
+  let densityFrame=null,densityMotion=null,densityProbe=null,compactProbe=null;
   const densityMedia=matchMedia('(prefers-reduced-motion: reduce)');
   const densityEase='cubic-bezier(0.32,0.72,0,1)';
   let guideReady=false,guideDismissed=false,guideOpened=false,guideSaving=false,guideError=false,usageGuideDismissed=false;
@@ -128,14 +129,21 @@ module.exports = function installAgPulseInlineWidget() {
     if(id===lastConversation)return false;
     lastConversation=id;conversationSwitchedAt=Date.now();lastHostGenerating=null;lastDomSubagents=0;lastDomTasks=0;
     requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
-    stopDensityMotion();densityFrame=null;densityProbe=null;
+    stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;
     manualRequest=null;refreshBusy(false);clearInlineChatCards();resetTaskProgressDom();
     data={connection:'offline',groups:[],speed:null};group=null;hide();
     // Navigation has its own refresh budget. A request from the old composer
     // must neither block the new route nor reset its polling clock on arrival.
     queueMicrotask(()=>{if(!disposed)refresh(true);});return true;
   }
+  function syncHostLocalization(){
+    if(!hostTranslator)return;
+    const isZh=language.language==='zh-CN'||language.language==='zh-TW';
+    const allowed=data?.hostLocalization!==false;
+    hostTranslator.setConfig({enabled:Boolean(isZh&&allowed),language:language.language});
+  }
   function localize(){
+    syncHostLocalization();
     attribute(node,'lang',language.language);
     for(const e of root.querySelectorAll('[data-i18n]')){const value=t(e.dataset.i18n);if(e.textContent!==value)e.textContent=value;}
     for(const e of root.querySelectorAll('[data-i18n-aria]'))attribute(e,'aria-label',t(e.dataset.i18nAria));
@@ -271,20 +279,44 @@ module.exports = function installAgPulseInlineWidget() {
       }
       return true;
     };
-    let safe=fits();
+    let safe=false;
     const rowWidth=composer.row.getBoundingClientRect().width;
-    const probeKey=()=>node.style.cssText.replace(/--pulse-native-room:[^;]+;?/g,'')+'|'+language.language+'|'+lastConversation+'|'+bar.textContent+'|'+$('dot').className+'|'+getComputedStyle(composer.row).gap+'|'+Array.from(composer.row.querySelectorAll('button,[role="button"],a[href],input,select')).filter(c=>c!==composer.model&&!c.contains(composer.model)).map(c=>c.getBoundingClientRect().width).join(',');
+    const probeKey=()=>node.style.cssText.replace(/--pulse-native-room:[^;]+;?/g,'')+'|'+language.language+'|'+lastConversation+'|'+(composer.model?.textContent||'')+'|'+bar.textContent+'|'+$('dot').className+'|'+getComputedStyle(composer.row).gap+'|'+Array.from(composer.row.querySelectorAll('button,[role="button"],a[href],input,select')).filter(c=>c!==composer.model&&!c.contains(composer.model)).map(c=>c.getBoundingClientRect().width).join(',');
+    const key=probeKey();
+    const fitCompactOrIcons=(capturePrev)=>{
+      node.dataset.compact='labels';
+      if(fits()){compactProbe={key,width:rowWidth};densityProbe=null;return true;}
+      if(capturePrev)previous=densitySnapshot(previous);
+      delete node.dataset.compact;
+      node.classList.add('icons-only');
+      const ok=fits();
+      compactProbe=null;
+      densityProbe={key,width:rowWidth};
+      return ok;
+    };
     if(oldDensity==='icons'){
-      const key=probeKey();
       // Twelve pixels of recovery headroom prevents threshold chatter. Shrinking
       // or scrolling in icon mode never toggles back to full just to measure it.
       if(!densityProbe||key!==densityProbe.key||rowWidth>=densityProbe.width+12){
-        previous=densitySnapshot(previous);node.classList.remove('icons-only');safe=fits();
-        if(!safe){node.classList.add('icons-only');safe=fits();densityProbe={key,width:rowWidth};}
-        else densityProbe=null;
+        previous=densitySnapshot(previous);node.classList.remove('icons-only');delete node.dataset.compact;safe=fits();
+        if(safe){densityProbe=null;compactProbe=null;}
+        else safe=fitCompactOrIcons(false);
+      }else{
+        safe=fits();
       }
-    }else if(!safe){
-      previous=densitySnapshot(previous);node.classList.add('icons-only');safe=fits();densityProbe={key:probeKey(),width:rowWidth};
+    }else{
+      const oldCompact=node.dataset.compact==='labels';
+      if(oldCompact&&compactProbe&&key===compactProbe.key&&rowWidth<compactProbe.width+12){
+        safe=fits();
+        if(!safe){
+          previous=densitySnapshot(previous);delete node.dataset.compact;node.classList.add('icons-only');safe=fits();
+          compactProbe=null;densityProbe={key,width:rowWidth};
+        }
+      }else{
+        delete node.dataset.compact;safe=fits();
+        if(safe)compactProbe=null;
+        else safe=fitCompactOrIcons(true);
+      }
     }
     node.dataset.density=node.classList.contains('icons-only')?'icons':'full';
     const state=safe?'ready':'blocked';
@@ -321,11 +353,27 @@ module.exports = function installAgPulseInlineWidget() {
     }
     return baseline;
   }
+  function modelTruncated(){
+    if(composer.kind!=='main'||!composer.model)return false;
+    const atMaxCap=element=>{
+      for(let cur=element;cur&&cur!==composer.row;cur=cur.parentElement){
+        const max=parseFloat(getComputedStyle(cur).maxWidth);
+        if(Number.isFinite(max)&&cur.getBoundingClientRect().width>=max-1)return true;
+      }
+      return false;
+    };
+    for(const element of [composer.branch,composer.model,...composer.model.querySelectorAll('*')]){
+      if(!visibleHostElement(element))continue;
+      if(element.scrollWidth>element.clientWidth+1&&!atMaxCap(element))return true;
+    }
+    return false;
+  }
   function nativeComfortable(){
     const baseline=composer.native;
     if(!baseline)return true;
     if(composer.branch.getBoundingClientRect().height>baseline.height+1)return false;
     if(baseline.icons.some(({icon,width})=>icon.isConnected&&icon.getBoundingClientRect().width<width-.5))return false;
+    if(composer.kind==='main'&&modelTruncated())return false;
     if(composer.kind==='ide'&&composer.branch.getBoundingClientRect().width<baseline.reserve-1)return false;
     if(composer.kind==='subagent'){
       if(composer.branch.getBoundingClientRect().width<baseline.reserve-1)return false;
@@ -557,7 +605,7 @@ module.exports = function installAgPulseInlineWidget() {
     }
     const found=findComposer();
     if(!found){
-      stopDensityMotion();densityFrame=null;densityProbe=null;composer=null;resizeObserver?.disconnect();
+      stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;composer=null;resizeObserver?.disconnect();
       if(node){
         hide();usageDashboard?.dispose();usageDashboard=null;updateMenu?.dispose();updateMenu=null;themeController?.dispose();themeController=null;
         node.remove();node=null;root=null;
@@ -574,7 +622,7 @@ module.exports = function installAgPulseInlineWidget() {
     const {editor,model,row,branch}=found;
     if(node)node.dataset.scope=found.kind;
     if(node?.isConnected&&node.parentElement===row&&node.previousElementSibling===branch)return;
-    if(node){stopDensityMotion();densityFrame=null;densityProbe=null;hide();row.insertBefore(node,branch.nextSibling);observeComposer();themeController?.dispose();themeController=theme.attach(node,{embedded:true});if(data?.theme)themeController.setHostTheme(data.theme);fit();position();return;}
+    if(node){stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;hide();row.insertBefore(node,branch.nextSibling);observeComposer();themeController?.dispose();themeController=theme.attach(node,{embedded:true});if(data?.theme)themeController.setHostTheme(data.theme);fit();position();return;}
     resizeObserver?.disconnect();node?.remove();node=document.createElement('div');node.id=ID;
     node.dataset.scope=found.kind;
     node.style.cssText='display:flex;align-items:center;flex:0 1 auto;min-width:0;max-width:min(100%,var(--pulse-native-room,100%));height:28px;margin:0 5px;position:relative;';
@@ -592,6 +640,7 @@ module.exports = function installAgPulseInlineWidget() {
     .footnote[hidden]{display:none}
     #transcript-details{margin-top:12px;border-top:1px solid var(--pulse-separator);padding-top:10px}#transcript-details summary{cursor:pointer;font-size:11px;color:var(--pulse-label)}#transcript-total{float:right;margin-left:8px;font-variant-numeric:tabular-nums;color:var(--pulse-foreground);font-size:10px}
     .bar{gap:6px}.chip{font-size:11px;gap:5px;padding:3px 5px}.context-card>strong{font-size:16px}.context-card>p{margin:8px 0}.quota-heading{margin-top:14px;padding-top:12px;border-top:1px solid var(--pulse-separator)}.quota-title{display:flex;align-items:center;gap:6px;font-size:11px}.quota-title>span:first-child{display:flex;align-items:center;gap:6px;margin-right:auto}.quota-title strong{font-variant-numeric:tabular-nums;font-size:13px}.quota-section+.quota-section{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:12px}.quota-section .track{margin:8px 0}.quota-section .footnote{margin-top:6px}.quota-section dl div{margin:6px 0}.context-label{white-space:nowrap}
+    :host([data-compact=labels]) .bar{gap:4px}:host([data-compact=labels]) .chip{padding:2px 4px;font-size:10.5px;gap:4px}:host([data-compact=labels]) .cache-total,:host([data-compact=labels]) .context-label,:host([data-compact=labels]) .task-title-snippet{display:none}
     :host(.icons-only) .bar{gap:2px}:host(.icons-only) .chip{flex:0 0 24px;width:24px;min-width:24px;height:24px;padding:0;gap:0;justify-content:center}:host(.icons-only) .chip>:not(svg):not(.context-ring):not(.task-indicator){display:none}:host(.icons-only) .bar>.language-button,:host(.icons-only) .bar>.dot{display:none}:host(.icons-only) .chip svg{display:block}.card-language{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}
     .usage-entry{margin-top:10px;padding-top:10px;border-top:1px solid var(--pulse-separator)}.usage-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}.usage-summary>div{padding:6px 8px;border-radius:7px;background:var(--pulse-control);border:1px solid var(--pulse-separator);display:flex;flex-direction:column;gap:2px}.usage-summary label{font-size:9.5px;color:var(--pulse-muted)}.usage-summary strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}.usage-unit{font-size:9.5px;color:var(--pulse-muted);font-weight:400;margin-left:3px}#open-usage{width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-radius:7px;border:1px solid var(--pulse-border);background:var(--pulse-control);color:var(--pulse-foreground);font-size:10.5px;font-weight:500;cursor:pointer;transition:background 140ms ease}#open-usage:hover{background:var(--pulse-hover)}.quota-details{margin-top:12px;padding-top:11px;border-top:1px solid var(--pulse-separator)}
     .refresh{display:inline-grid;place-items:center}.refresh[aria-busy=true]{color:var(--pulse-emphasis);cursor:wait}.refresh[aria-busy=true] svg{animation:pulse-refresh-spin 1s linear infinite;transform-origin:center}
@@ -1059,7 +1108,13 @@ module.exports = function installAgPulseInlineWidget() {
         hidden(badge,!badgeStr);
       }
       const cleanHead=tp.headline?tp.headline.replace(/^(?:🤔|⚙️|⚠️|✓|📋|⏹|🔄)\s*/u,'').replace(/^\[\d+\/\d+\]\s*/,''):'';
-      text('task-title-snippet',isStalled?t('taskStalled'):(cleanHead||t('taskProgress')));
+      const labelText=isStalled?t('taskStalled'):(cleanHead||t('taskProgress'));
+      const snippet=$('task-title-snippet');
+      if(snippet){
+        text('task-title-snippet',labelText);
+        hidden(snippet,!isRunning&&!isStalled);
+      }
+      chip.title=labelText;
     }
     text('tp-gauge-percent',`${percent}%`);
     const circumference=113.1;
@@ -1226,6 +1281,7 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function render(){
     if(!root||!data)return;
+    syncHostLocalization();
     syncConversation();
     attribute($('dot'),'class',`dot ${data.connection}`);
     attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));
@@ -1301,8 +1357,8 @@ module.exports = function installAgPulseInlineWidget() {
     if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:800))refresh();
   },600);
   window.__agPulseDispose=()=>{
-    disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;
-    clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hide();usageDashboard?.dispose();updateMenu?.dispose();clearInlineChatCards();node?.remove();
+    disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;
+    clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hostTranslator?.dispose();hide();usageDashboard?.dispose();updateMenu?.dispose();clearInlineChatCards();node?.remove();
     document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);document.removeEventListener('focusin',onFocus);
     document.removeEventListener('scroll',scheduleLayout,true);window.removeEventListener('resize',scheduleLayout);
     densityMedia.removeEventListener('change',stopDensityMotion);
