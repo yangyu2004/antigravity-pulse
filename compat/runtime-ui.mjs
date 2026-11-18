@@ -34,6 +34,13 @@ export function validatedInput(value) {
   // Historical usage import is an explicit, user-visible action. It must not
   // be started by the high-frequency inline metrics poll.
   if (value.usageSync === true) result.usageSync = true;
+  if (Array.isArray(value.extraConversationIds)) {
+    const extra = value.extraConversationIds
+      .filter(id => typeof id === 'string' && GUID.test(id))
+      .map(id => id.toLowerCase())
+      .slice(0, 4);
+    if (extra.length) result.extraConversationIds = extra;
+  }
   return result;
 }
 
@@ -258,6 +265,7 @@ export class RuntimeUi {
       if(!await this.owns()){await this.detachAll();return;}
       if (!await this.enabled()) { await this.detachAll(); await this.setHealth('disabled', 'Dashboard is disabled'); return; }
       const targets = await this.discover(this.profile), active = new Set(targets.map(t => t.webSocketDebuggerUrl));
+      this._missingPortLogged = false;
       if (this.stopping||!await this.owns()) return;
       for (const [url, connection] of this.sessions) if (!active.has(url) || connection.closed) { connection.close(); this.sessions.delete(url); }
       for (const target of targets) {
@@ -300,8 +308,18 @@ export class RuntimeUi {
       await this.setHealth([...this.sessions.values()].some(c => c.mounted) ? 'mounted' : this.sessions.size ? 'waiting-for-composer' : 'waiting',
         this.sessions.size ? 'Renderer connected; waiting for a conversation composer if needed' : 'Waiting for the app renderer');
     } catch (e) {
-      console.error('[RuntimeUi tick error]:', e);
-      await this.setHealth('reconnecting', 'Inline connection unavailable: ' + (e?.message || e));
+      if (e?.code === 'ENOENT' && String(e?.path || e?.message || '').includes('DevToolsActivePort')) {
+        const msg = '未检测到 DevToolsActivePort：Antigravity 2.33.0+ 默认关闭了调试端口，请完整退出后使用 --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 启动（或运行 python3 manage.py launch --restart）以恢复状态栏、卡片与汉化。';
+        if (!this._missingPortLogged) {
+          this._missingPortLogged = true;
+          console.warn('[RuntimeUi]', msg);
+        }
+        await this.setHealth('reconnecting', msg);
+      } else {
+        this._missingPortLogged = false;
+        console.error('[RuntimeUi tick error]:', e);
+        await this.setHealth('reconnecting', 'Inline connection unavailable: ' + (e?.message || e));
+      }
     }
     finally { this.busy = false; }
   }

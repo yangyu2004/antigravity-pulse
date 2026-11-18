@@ -75,7 +75,7 @@ module.exports = function installAgPulseInlineWidget() {
       while(stack.length){
         if(--budget<0)return {markers,evidence,limited:true};
         const {element,depth}=stack.pop();
-        if(element.matches('[data-testid="subagent-tab-conversation"]')){evidence=true;if(visibleHostElement(element))markers.push(element);continue;}
+        if(element.matches('[data-testid="subagent-tab-conversation"],[data-testid="side-question-tab-conversation"]')){evidence=true;if(visibleHostElement(element))markers.push(element);continue;}
         if(element===node||element.closest('[hidden],[inert]'))continue;
         const css=getComputedStyle(element);if(css.display==='none'||css.visibility==='hidden')continue;
         if(element.matches(paneBoundary+', [data-testid="conversation-view"]'))continue;
@@ -94,7 +94,8 @@ module.exports = function installAgPulseInlineWidget() {
       // The host may reuse the old sidebar content root for Full View.
       if(scope.matches('[data-testid="conversation-view"]'))return readId(scope);
       if(scope===anchor&&scope.hasAttribute('data-cascade-id'))return readId(scope);
-      if(branch&&composer.kind==='subagent'){
+      const inSideQuestion=Boolean(anchor?.closest('[data-testid="side-question-tab-content"],[data-testid="side-question-tab-composer"]'));
+      if(branch&&(composer.kind==='subagent'||inSideQuestion)){
         const {markers,evidence,limited}=markersIn(scope,branch);
         if(limited)return null;
         if(evidence){
@@ -125,7 +126,7 @@ module.exports = function installAgPulseInlineWidget() {
     });
   }
   function syncConversation(){
-    const id=conversationId();
+    const id=node?.isConnected?conversationId():(visibleCardScopes()[0]?.id||conversationId());
     if(id===lastConversation)return false;
     lastConversation=id;conversationSwitchedAt=Date.now();lastHostGenerating=null;lastDomSubagents=0;lastDomTasks=0;
     requestEpoch++;pending=false;refreshRequest=null;lastFetch=0;
@@ -144,6 +145,7 @@ module.exports = function installAgPulseInlineWidget() {
   }
   function localize(){
     syncHostLocalization();
+    if(!root)return;
     attribute(node,'lang',language.language);
     for(const e of root.querySelectorAll('[data-i18n]')){const value=t(e.dataset.i18n);if(e.textContent!==value)e.textContent=value;}
     for(const e of root.querySelectorAll('[data-i18n-aria]'))attribute(e,'aria-label',t(e.dataset.i18nAria));
@@ -613,6 +615,7 @@ module.exports = function installAgPulseInlineWidget() {
         // Invalidate this mount's pending requests and rebuild on discovery.
         requestEpoch++;pending=false;refreshRequest=null;manualRequest=null;lastFetch=0;
       }
+      if(visibleCardScopes().length&&!lastFetch)queueMicrotask(()=>{if(!disposed)refresh(true);});
       return;
     }
     found.native=composer?.branch===found.branch&&composer?.anchor===found.anchor?composer.native:captureNative(found);
@@ -860,18 +863,24 @@ module.exports = function installAgPulseInlineWidget() {
     }
     return out.replace(/\s+/g,' ').trim();
   }
+  function isGenuineSubagentSidebar(scope,sideTab){
+    return composer?.kind==='subagent'&&!sideTab&&(!scope||scope.matches('[data-testid="subagent-tab-conversation"]')||Boolean(composer?.box?.closest('[data-aux-pane-open]')?.querySelector('[data-testid="subagent-tab-conversation"]')));
+  }
   function countDomRunningIndicators(){
-    if(composer?.kind==='subagent')return {subagents:0,tasks:0};
-    const convScope=composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||document.querySelector('[data-testid="conversation-view"]');
+    const sideTab=composer?.box?.closest('[data-testid="side-question-tab-content"]');
+    const convScope=sideTab?.querySelector('[data-testid="side-question-tab-conversation"]')||composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||document.querySelector('[data-testid="conversation-view"]');
+    if(isGenuineSubagentSidebar(convScope,sideTab))return {subagents:0,tasks:0};
     if(!convScope)return {subagents:0,tasks:0};
+    const isSideTab=Boolean(sideTab||convScope.matches?.('[data-testid="side-question-tab-conversation"]'));
     const checkSet=[];
     const responses=convScope.querySelectorAll('[data-testid="agent-response"]');
     for(let i=Math.max(0,responses.length-8);i<responses.length;i++){
+      if(!isSideTab&&responses[i].closest('[data-testid="side-question-tab-conversation"]'))continue;
       const all=responses[i].querySelectorAll('span,div,button');
       for(let j=Math.max(0,all.length-80);j<all.length;j++)checkSet.push(all[j]);
     }
     for(const child of convScope.children){
-      if(child===composer?.box||child.contains?.(composer?.box)||child.matches?.('[data-testid="subagent-tab-conversation"]'))continue;
+      if(child===composer?.box||child.contains?.(composer?.box)||child.matches?.('[data-testid="subagent-tab-conversation"],[data-testid="side-question-tab-conversation"]'))continue;
       if(!child.querySelector?.('[data-testid="agent-response"]')){
         const els=child.querySelectorAll?.('span,div,button')||[];
         for(let k=0;k<Math.min(els.length,60);k++)checkSet.push(els[k]);
@@ -880,6 +889,7 @@ module.exports = function installAgPulseInlineWidget() {
     let subagents=0,tasks=0;
     for(const el of checkSet){
       if(!el?.isConnected||el.childElementCount>3||el.closest('pre,code,[contenteditable="true"],[hidden],[inert],[data-testid="subagent-tab-conversation"],#ag-pulse-status-bar,.ag-pulse-inline-chat-host'))continue;
+      if(!isSideTab&&el.closest('[data-testid="side-question-tab-conversation"]'))continue;
       const raw=extractElementDirectText(el);
       if(!raw||raw.length>48)continue;
       const mSubEn=raw.match(/^(\d+)\s+subagents?\s+running$/i);
@@ -1001,14 +1011,35 @@ module.exports = function installAgPulseInlineWidget() {
       setTimeout(()=>{reinvoking=false;},1500);
     }
   }
-  function renderInlineChatCard(tp){
-    if(!tp||composer?.kind==='subagent')return;
-    const convScope=composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||document;
-    const responses=Array.from(convScope.querySelectorAll('[data-testid="agent-response"]')).filter(el=>el.isConnected&&!el.closest('[hidden],[inert],[data-testid="subagent-tab-conversation"]')&&getComputedStyle(el).display!=='none');
+  function visibleCardScopes(){
+    const out=[];
+    for(const el of document.querySelectorAll('[data-testid="side-question-tab-conversation"][data-cascade-id],[data-testid="conversation-view"][data-cascade-id]')){
+      if(!visibleHostElement(el)||el.closest('[data-testid="subagent-tab-conversation"]'))continue;
+      const rawId=el.getAttribute('data-cascade-id')||'';
+      if(GUID.test(rawId))out.push({el,id:rawId.toLowerCase()});
+    }
+    return out;
+  }
+  function resolvePrimaryCardScope(){
+    const sideTab=composer?.box?.closest('[data-testid="side-question-tab-content"]');
+    const scopes=visibleCardScopes();
+    const scope=node?.isConnected?(sideTab?.querySelector('[data-testid="side-question-tab-conversation"]')||composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]')||(composer?document.querySelector('[data-testid="conversation-view"]'):(scopes[0]?.el||null))):(scopes[0]?.el||null);
+    return {scope,isGenuineSubagentSidebar:isGenuineSubagentSidebar(scope,sideTab),scopes};
+  }
+  function clearCardInScope(convScope){
+    if(!convScope)return;
+    for(const host of convScope.querySelectorAll('.ag-pulse-inline-chat-host')){
+      if(host.closest('[data-testid="side-question-tab-conversation"],[data-testid="conversation-view"]')===convScope)host.remove();
+    }
+  }
+  function renderCardInScope(convScope,tp){
+    if(!convScope||!tp)return;
+    const isSideTab=Boolean(convScope.matches?.('[data-testid="side-question-tab-conversation"]'));
+    const responses=Array.from(convScope.querySelectorAll('[data-testid="agent-response"]')).filter(el=>el.isConnected&&!el.closest('[hidden],[inert],[data-testid="subagent-tab-conversation"]')&&(isSideTab||!el.closest('[data-testid="side-question-tab-conversation"]'))&&getComputedStyle(el).display!=='none');
     const lastResponse=responses[responses.length-1];
     if(!lastResponse)return;
     const turnIdx=Number.isFinite(tp.turnStepIdx)?tp.turnStepIdx:-1;
-    const bodyDiv=lastResponse.children[1]||lastResponse;
+    const bodyDiv=lastResponse.hasAttribute('data-step-rows')?lastResponse:(lastResponse.querySelector(':scope > [data-step-list]')||lastResponse.children[1]||lastResponse);
     let chatHost=Array.from(bodyDiv.children).find(c=>c.classList?.contains('ag-pulse-inline-chat-host'));
     if(!tp.showInlineCard||!Array.isArray(tp.steps)||tp.steps.length<2){
       if(tp.status==='idle'&&turnIdx>=0&&!lastResponse.dataset.agPulseTurn){
@@ -1083,9 +1114,23 @@ module.exports = function installAgPulseInlineWidget() {
       }).join(''));
     }
   }
+  function renderInlineChatCard(tp){
+    const {scope,isGenuineSubagentSidebar,scopes}=resolvePrimaryCardScope();
+    const activeConv=(node?.isConnected?conversationId():null)||scopes[0]?.id||null;
+    if(tp&&!isGenuineSubagentSidebar&&scope){
+      renderCardInScope(scope,tp);
+    }
+    const auxMap=data?.auxTaskProgress;
+    for(const entry of scopes){
+      if(entry.el===scope&&!isGenuineSubagentSidebar&&tp)continue;
+      const scopeTp=entry.id===activeConv?tp:auxMap?.[entry.id];
+      if(scopeTp)renderCardInScope(entry.el,scopeTp);
+      else clearCardInScope(entry.el);
+    }
+  }
   function renderTaskProgress(tp){
     lastTaskProgress=tp||null;
-    if(!root)return;
+    if(!root){renderInlineChatCard(tp);return;}
     const chip=$('task-chip');
     if(!tp){
       if(chip)hidden(chip,true);
@@ -1280,8 +1325,9 @@ module.exports = function installAgPulseInlineWidget() {
     style($('context-fill'),'background',hasCap&&ctx.usedFraction>=.9?'var(--pulse-danger)':'');
   }
   function render(){
-    if(!root||!data)return;
+    if(!data)return;
     syncHostLocalization();
+    if(!root){renderTaskProgress(data?.taskProgress);return;}
     syncConversation();
     attribute($('dot'),'class',`dot ${data.connection}`);
     attribute($('dot'),'title',t(data.connection==='live'?'live':data.connection==='stale'?'stale':'offline'));
@@ -1328,16 +1374,20 @@ module.exports = function installAgPulseInlineWidget() {
     if(disposed)return;
     if(syncConversation())render();
     if(pending)return refreshRequest;
-    if(!node?.isConnected)return;
-    const conversation=conversationId();
+    const scopes=visibleCardScopes();
+    if(!node?.isConnected&&!scopes.length)return;
+    const conversation=node?.isConnected?conversationId():(scopes[0]?.id||null);
+    if(!node?.isConnected&&!conversation)return;
+    if(!node?.isConnected)lastConversation=conversation;
+    const extraConversationIds=[...new Set(scopes.map(s=>s.id).filter(id=>id&&id!==conversation))].slice(0,4);
     const epoch=requestEpoch;
-    const current=()=>!disposed&&epoch===requestEpoch&&conversation===conversationId()&&conversation===lastConversation&&node?.isConnected;
+    const current=()=>!disposed&&epoch===requestEpoch&&(node?.isConnected?(conversation===conversationId()&&conversation===lastConversation):visibleCardScopes().some(s=>s.id===conversation));
     pending=true;lastFetch=Date.now();
     const {subagents:domRunningSubagents,tasks:domRunningTasks}=countDomRunningIndicators();
     const hostGenerating=isHostGenerating(domRunningSubagents);
     lastHostGenerating=hostGenerating;lastDomSubagents=domRunningSubagents;lastDomTasks=domRunningTasks;
     refreshRequest=(async()=>{
-      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(domRunningSubagents>0?{domRunningSubagents}:{}),...(domRunningTasks>0?{domRunningTasks}:{}),...(syncUsage?{usageSync:true}:{})});if(!current())return;node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
+      try{const result=await window.agPulseHost.getMetrics({conversationId:conversation,force,hostGenerating,...(domRunningSubagents>0?{domRunningSubagents}:{}),...(domRunningTasks>0?{domRunningTasks}:{}),...(extraConversationIds.length?{extraConversationIds}:{}),...(syncUsage?{usageSync:true}:{})});if(!current())return;if(node)node.style.visibility='visible';if(!conversation||result.speed&&result.speed.conversationId!==conversation)result.speed=null;data=result;if(result.preferences){syncGuide(result.preferences);preferences.sync(result.preferences);guideReady=!preferences.error;}if(Object.hasOwn(result,'theme'))themeController?.setHostTheme(result.theme);render();}
       catch{if(current()&&data){data.connection='stale';data.error=t('reconnecting');render();}}
       finally{if(epoch===requestEpoch){pending=false;refreshRequest=null;}}
     })();
@@ -1354,7 +1404,9 @@ module.exports = function installAgPulseInlineWidget() {
     const {subagents:curSub,tasks:curTasks}=countDomRunningIndicators(),curGen=isHostGenerating(curSub);
     const stateFlipped=(curGen!==lastHostGenerating&&curGen!==null)||curSub!==lastDomSubagents||curTasks!==lastDomTasks;
     if(stateFlipped){syncOptimisticRunningState();refresh(true);return;}
-    if(conversationId()!==lastConversation||Date.now()-lastFetch>(document.hidden?10000:800))refresh();
+    const intervalMs=document.hidden?10000:800;
+    const curConv=node?.isConnected?conversationId():(visibleCardScopes()[0]?.id||null);
+    if(curConv!==lastConversation||Date.now()-lastFetch>intervalMs)refresh();
   },600);
   window.__agPulseDispose=()=>{
     disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;

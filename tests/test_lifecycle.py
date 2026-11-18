@@ -157,4 +157,32 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(res2['status'], 'throttled')
             self.assertEqual(calls, ['check', 'apply'])
 
+    def test_launch_and_install_launcher_respect_debug_flags(self):
+        profile = self.home / 'profile'
+        profile.mkdir(parents=True)
+        app_bundle = self.home / 'Antigravity.app'
+        asar = app_bundle / 'Contents' / 'Resources' / 'app.asar'
+        asar.parent.mkdir(parents=True)
+        asar.write_bytes(b'asar')
+        with patch.multiple(manager, HOME=self.home, APP=asar, PROFILE=profile):
+            stale = profile / 'DevToolsActivePort'
+            stale.write_text('9\n', encoding='utf-8')
+            with patch('sys.platform', 'darwin'), patch.object(manager, '_is_desktop_running', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, '--restart'):
+                    manager.launch(restart=False, wait_timeout=0)
+            with patch('sys.platform', 'darwin'), \
+                 patch.object(manager, '_is_desktop_running', return_value=False), \
+                 patch('subprocess.run') as mock_run:
+                manager.launch(restart=False, wait_timeout=0)
+                self.assertFalse(stale.exists())
+                mock_run.assert_called_once_with(
+                    ['open', '-a', str(app_bundle), '--args', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1'],
+                    check=True,
+                )
+            with patch('sys.platform', 'darwin'):
+                launcher = manager.install_launcher()
+                self.assertTrue((launcher / 'Contents' / 'MacOS' / 'launch').is_file())
+                script_text = (launcher / 'Contents' / 'MacOS' / 'launch').read_text(encoding='utf-8')
+                self.assertIn('--remote-debugging-port=0 --remote-debugging-address=127.0.0.1', script_text)
+
 if __name__ == '__main__': unittest.main()

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.8 — 2026-11-18
+
+- **适配 Antigravity 2.33.0+ 默认关闭 CDP 调试端口的变更**：
+  - 核查确认 Antigravity `2.33.0` 移除了默认 `--remote-debugging-port=0` 并在启动时主动清理 `DevToolsActivePort`（需显式传入 `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 才能启用内嵌状态栏、步骤卡片与界面汉化；渲染层 `/main.js` 关键 DOM 标识在 `2.33.0` 保持兼容）。
+  - 优化 `compat/runtime-ui.mjs` 对 `DevToolsActivePort` 缺失（`ENOENT`）的诊断提示与日志节流，避免每 3 秒向 `sidecar.log` 刷屏报错，并在 `manage.py status` 新增 `debugPortActive` 字段。
+  - 新增 `python3 manage.py launch [--restart]` 一键带调试端口启动/重启客户端，以及 `python3 manage.py install-launcher` 创建用户级快捷启动器（macOS `~/Applications/Antigravity (Pulse).app` / Linux `.desktop`），全程不修改 `app.asar` 或应用签名。
+- **修复 `/btw`（Side Question）分支对话中 Claude 风格步骤卡片不显示的 Bug**：
+  - 修复 `compat/inline-widget.cjs` 未识别 `[data-testid="side-question-tab-conversation"]` 兄弟结构、把 `hideModelSelector: true` 的 `/btw` 对话误当成只读子代理标签跳过卡片渲染、以及在无模型选择器/无静态徽章的全屏 `/btw` 视图中因无法挂载底部状态条而连带放弃卡片轮询的问题。
+  - `compat/runtime-ui.mjs`、`sidecars/panel/main.mjs` 与 `compat/inline-widget.cjs` 新增 `extraConversationIds` / `auxTaskProgress` 双栏同步机制：主对话保持焦点时，右侧 `/btw` 分栏仍独立渲染并实时刷新自己的步骤卡片；`compat/host-i18n.cjs` 同步放行 `[data-testid="side-question-origin"]` 翻译。
+
 ## 0.9.7 — 2026-11-17
 
 - 新增非侵入式宿主界面汉化引擎（`compat/host-i18n.cjs`）：复用插件现有 CDP 运行时注入通道动态翻译 Antigravity 2.32.1 桌面端及 IDE 原生英文 UI（侧边栏、设置页、权限预设、弹窗、计时文本与动态占位符等 600+ 词条及动态正则），全程不修改 `app.asar`，避免触发客户端完整性校验。

@@ -278,3 +278,22 @@ test('takeover during attachment removes old preload and leaves no retained conn
   assert.equal(connections[0].calls.some(call=>call.method==='Runtime.evaluate'),false);
   await ui.stop();
 });
+
+test('missing DevToolsActivePort surfaces 2.33.0+ guidance and logs warning only once per outage',async()=>{
+  const {ui}=fixture();
+  ui.discover=async()=>{const err=new Error("ENOENT: no such file or directory, open '/mock/Antigravity/DevToolsActivePort'");err.code='ENOENT';err.path='/mock/Antigravity/DevToolsActivePort';throw err;};
+  const warns=[],errors=[];
+  const origWarn=console.warn,origErr=console.error;
+  console.warn=(...a)=>warns.push(a.join(' '));
+  console.error=(...a)=>errors.push(a.join(' '));
+  try{
+    await ui.tick();
+    await ui.tick();
+  }finally{
+    console.warn=origWarn;console.error=origErr;
+  }
+  assert.equal(ui.health.state,'reconnecting');
+  assert.match(ui.health.message,/2\.33\.0\+.*manage\.py launch/);
+  assert.equal(warns.length,1);
+  assert.equal(errors.length,0);
+});

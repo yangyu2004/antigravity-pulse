@@ -34,6 +34,7 @@ const taskMonitor=new TaskMonitor();
 const titleRenamer=new TitleRenamer({client:store.client,dataDir:paths.data});
 const updater=new AppUpdater({pluginDir:join(HERE,'..','..'),dataDir:paths.data});
 let activeTurnAt=0;
+const GUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const metrics = async input => {
   if(ownership&&!await ownership.isOwner())throw Error('Sidecar ownership changed');
   const s=runtimeSettings();
@@ -47,7 +48,35 @@ const metrics = async input => {
     cascadeState,
   });
   if(taskProgress?.status==='running'||taskProgress?.status==='stalled')activeTurnAt=Date.now();
-  return {...base,taskProgress,hostLocalization:s.hostLocalization!==false,usage:await usage.snapshot({sync:input?.usageSync===true}),preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health};
+  let auxTaskProgress=null;
+  if(Array.isArray(input?.extraConversationIds)&&input.extraConversationIds.length){
+    const ids=[];
+    const seen=new Set();
+    for(const rawId of input.extraConversationIds){
+      if(typeof rawId!=='string'||!GUID_RE.test(rawId))continue;
+      const extraId=rawId.toLowerCase();
+      if(extraId===input?.conversationId||seen.has(extraId))continue;
+      seen.add(extraId);
+      ids.push(extraId);
+      if(ids.length>=4)break;
+    }
+    if(ids.length){
+      const settled=await Promise.allSettled(ids.map(async extraId=>{
+        const extraCascade=typeof store.cascadeRunState==='function'?await store.cascadeRunState(extraId,{force:false}):null;
+        return [extraId,await taskMonitor.snapshot(extraId,{cascadeState:extraCascade})];
+      }));
+      const map={};
+      for(const item of settled){
+        if(item.status==='fulfilled'&&item.value[1]){
+          const [extraId,snap]=item.value;
+          map[extraId]=snap;
+          if(snap.status==='running'||snap.status==='stalled')activeTurnAt=Date.now();
+        }
+      }
+      if(Object.keys(map).length)auxTaskProgress=map;
+    }
+  }
+  return {...base,taskProgress,...(auxTaskProgress?{auxTaskProgress}:{}),hostLocalization:s.hostLocalization!==false,usage:await usage.snapshot({sync:input?.usageSync===true}),preferences:await preferences.snapshot(),theme:await readHostTheme(),integration:integration.health};
 };
 const usageSource=()=>{const s=readFileSync(join(HERE,'..','..','compat','usage-ui.cjs'),'utf8');return `window.__agPulseUsageFactory=(${s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'')});`;};
 const updateSource=()=>{const s=readFileSync(join(HERE,'..','..','compat','update-ui.cjs'),'utf8');return `window.__agPulseUpdateFactory=(${s.slice(s.indexOf('module.exports = ')+17).trim().replace(/;$/,'')});`;};

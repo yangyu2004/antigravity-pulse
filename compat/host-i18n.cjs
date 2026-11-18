@@ -106,7 +106,8 @@ module.exports = function createHostTranslator(initialConfig = {}) {
     if (!el || el.nodeType !== 1) return true;
     if (el.closest('#ag-pulse-status-bar,.ag-pulse-inline-chat-host,pre,code,kbd,samp,script,style,noscript,svg,.monaco-editor,.xterm,.CodeMirror')) return true;
     if (!forAttr) {
-      if (el.closest('[contenteditable="true"],textarea,input,[data-testid="model-selector-trigger"],[data-testid="agent-response"] .prose,[data-testid="agent-response"] .markdown,[data-testid="user-message"],[data-message-role="user"]')) return true;
+      if (el.closest('[contenteditable="true"],textarea,input,[data-testid="model-selector-trigger"],[data-testid="agent-response"] .prose,[data-testid="agent-response"] .markdown')) return true;
+      if (el.closest('[data-testid="user-message"],[data-message-role="user"]') && !el.closest('[data-testid="side-question-origin"]')) return true;
     }
     return false;
   }

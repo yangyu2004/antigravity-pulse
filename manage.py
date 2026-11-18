@@ -5,9 +5,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import zipfile
 from functools import wraps
 
@@ -22,6 +25,7 @@ PLUGIN = HOME / '.gemini' / 'config' / 'plugins' / 'antigravity-pulse'
 CONFIG = HOME / '.gemini' / 'config' / 'config.json'
 SETTINGS = _paths['settings']
 APP = _paths['app']
+PROFILE = _paths['profile']
 BACKUPS = _paths['backups']
 RUNTIME_FILES = ('assets', 'compat', 'sidecars', 'hooks', 'hooks.json', 'rules', 'plugin.json')
 DIST_FILES = ('plugin.json', 'assets', 'sidecars', 'compat', 'hooks', 'hooks.json', 'rules', 'cli', 'ide', 'manage.py', 'install.ps1',
@@ -264,6 +268,23 @@ def uninstall():
     print('Antigrative Dashboard removed. Backups and diagnostic logs are retained for recovery.')
     print('Fully quit and reopen Antigravity to unload the UI adapter.')
 
+def _active_debug_port(active_port_file):
+    try:
+        lines = active_port_file.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return None
+    if not lines or not lines[0].strip().isdigit():
+        return None
+    port = int(lines[0].strip())
+    if port < 1 or port > 65535:
+        return None
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.3):
+            return port
+    except OSError:
+        return None
+
+
 def status():
     installed = (PLUGIN / 'plugin.json').is_file()
     enabled = installed and json_read(CONFIG).get('plugins', {}).get('antigravity-pulse', {}).get('enabled', True)
@@ -272,8 +293,157 @@ def status():
     print(json.dumps({'installed': installed, 'enabled': bool(enabled), 'autoUpdate': settings.get('autoUpdate', True) is not False,
                       'pluginDirectory': str(PLUGIN),
                       'integrationMode': settings.get('mode', 'legacy'),
+                      'debugPortActive': _active_debug_port(PROFILE / 'DevToolsActivePort') is not None,
                       'inlineIntegration': json_read(health_file, None),
                       'toolbarAdapterRecoverable': APP.exists() and original_for_current(APP.read_bytes()) is not None}, indent=2))
+
+
+def resolve_desktop_entry():
+    if sys.platform == 'darwin':
+        if APP.is_file() and len(APP.parents) >= 3 and APP.parents[2].suffix == '.app':
+            return APP.parents[2]
+        for candidate in (Path('/Applications/Antigravity.app'), HOME / 'Applications' / 'Antigravity.app'):
+            if candidate.exists():
+                return candidate
+        raise RuntimeError('Antigravity.app not found in /Applications or ~/Applications.')
+    if sys.platform == 'win32':
+        exe = APP.parents[1] / 'Antigravity.exe' if len(APP.parents) >= 2 else None
+        if exe and exe.is_file():
+            return exe
+        raise RuntimeError('Antigravity.exe not found next to app.asar.')
+    if APP.is_file() and len(APP.parents) >= 2:
+        exe = APP.parents[1] / 'antigravity'
+        if exe.is_file():
+            return exe
+    found = shutil.which('antigravity')
+    if found:
+        return Path(found)
+    raise RuntimeError('Antigravity executable not found.')
+
+
+def _is_desktop_running():
+    if sys.platform == 'darwin':
+        return subprocess.run(['pgrep', '-x', 'Antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+    if sys.platform == 'win32':
+        res = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq Antigravity.exe', '/NH'],
+                             capture_output=True, text=True, check=False,
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
+        return 'Antigravity.exe' in (res.stdout or '')
+    return subprocess.run(['pgrep', '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+
+
+def launch(restart=False, wait_timeout=8.0):
+    entry = resolve_desktop_entry()
+    active_port_file = PROFILE / 'DevToolsActivePort'
+    if _is_desktop_running():
+        if not restart:
+            if _active_debug_port(active_port_file) is not None:
+                print('Antigravity is already running with DevToolsActivePort enabled.')
+                return
+            raise RuntimeError('Antigravity is currently running without a debug port. Quit Antigravity first or run: python3 manage.py launch --restart')
+        if sys.platform == 'darwin':
+            subprocess.run(['osascript', '-e', 'tell application "Antigravity" to quit'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        elif sys.platform == 'win32':
+            subprocess.run(['taskkill', '/IM', 'Antigravity.exe'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
+        else:
+            subprocess.run(['pkill', '-TERM', '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and _is_desktop_running():
+            time.sleep(0.25)
+        if _is_desktop_running():
+            raise RuntimeError('Timed out waiting for Antigravity to quit. Please close it manually and retry.')
+    if active_port_file.exists():
+        try:
+            active_port_file.unlink()
+        except OSError:
+            pass
+    debug_flags = ['--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1']
+    if sys.platform == 'darwin':
+        subprocess.run(['open', '-a', str(entry), '--args', *debug_flags], check=True)
+    elif sys.platform == 'win32':
+        subprocess.Popen([str(entry), *debug_flags],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, 'DETACHED_PROCESS', 0x00000008))
+    else:
+        subprocess.Popen([str(entry), *debug_flags], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + wait_timeout
+    port = None
+    while time.monotonic() < deadline:
+        port = _active_debug_port(active_port_file)
+        if port is not None:
+            break
+        time.sleep(0.2)
+    if port is not None:
+        print(f'Launched {entry} with CDP debug port {port}.')
+    else:
+        print(f'Launched {entry} with {" ".join(debug_flags)}.')
+
+
+def install_launcher():
+    entry = resolve_desktop_entry()
+    if sys.platform == 'darwin':
+        app_dir = HOME / 'Applications' / 'Antigravity (Pulse).app'
+        macos_dir = app_dir / 'Contents' / 'MacOS'
+        res_dir = app_dir / 'Contents' / 'Resources'
+        macos_dir.mkdir(parents=True, exist_ok=True)
+        res_dir.mkdir(parents=True, exist_ok=True)
+        plist = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            '<dict>\n'
+            '  <key>CFBundleName</key>\n'
+            '  <string>Antigravity (Pulse)</string>\n'
+            '  <key>CFBundleDisplayName</key>\n'
+            '  <string>Antigravity (Pulse)</string>\n'
+            '  <key>CFBundleIdentifier</key>\n'
+            '  <string>com.antigravity.pulse.launcher</string>\n'
+            '  <key>CFBundleVersion</key>\n'
+            '  <string>1.0</string>\n'
+            '  <key>CFBundleExecutable</key>\n'
+            '  <string>launch</string>\n'
+            '  <key>CFBundleIconFile</key>\n'
+            '  <string>icon.icns</string>\n'
+            '  <key>LSUIElement</key>\n'
+            '  <true/>\n'
+            '</dict>\n'
+            '</plist>\n'
+        )
+        (app_dir / 'Contents' / 'Info.plist').write_text(plist, encoding='utf-8')
+        icon_src = Path(entry) / 'Contents' / 'Resources' / 'icon.icns'
+        if icon_src.is_file():
+            shutil.copy2(icon_src, res_dir / 'icon.icns')
+        script = macos_dir / 'launch'
+        quoted_entry = shlex.quote(str(entry))
+        script.write_text(
+            '#!/bin/sh\n'
+            f'exec open -a {quoted_entry} --args --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 "$@"\n',
+            encoding='utf-8',
+        )
+        os.chmod(script, 0o755)
+        print('Created macOS launcher:', app_dir)
+        return app_dir
+    if sys.platform.startswith('linux'):
+        desktop_dir = HOME / '.local' / 'share' / 'applications'
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        desktop_file = desktop_dir / 'antigravity-pulse.desktop'
+        desktop_file.write_text(
+            '[Desktop Entry]\n'
+            'Type=Application\n'
+            'Name=Antigravity (Pulse)\n'
+            f'Exec="{entry}" --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 %F\n'
+            'Terminal=false\n'
+            'Categories=Development;IDE;\n',
+            encoding='utf-8',
+        )
+        os.chmod(desktop_file, 0o755)
+        print('Created Linux desktop entry:', desktop_file)
+        return desktop_file
+    print(f'Launch {entry} with: --remote-debugging-port=0 --remote-debugging-address=127.0.0.1')
+    return entry
 
 def package(output=None):
     version = json_read(SOURCE / 'plugin.json')['version']
@@ -305,7 +475,9 @@ def main():
     group.add_argument('--legacy-loader', action='store_true', help='Opt in to the old, version-specific app.asar adapter')
     p.add_argument('--app-path', type=Path, help='Path to the desktop app resources/app.asar for a custom installation')
     p.add_argument('--no-auto-update', action='store_true', help='Disable background automatic updates on install')
-    for action in ('enable', 'disable', 'status', 'uninstall'): sub.add_parser(action)
+    for action in ('enable', 'disable', 'status', 'uninstall', 'install-launcher'): sub.add_parser(action)
+    p = sub.add_parser('launch', help='Launch Antigravity desktop with CDP debug port enabled (required for 2.33.0+)')
+    p.add_argument('--restart', action='store_true', help='Quit currently running Antigravity and relaunch with debug port')
     p = sub.add_parser('auto-update', help='Check GitHub Releases and apply updates automatically')
     p.add_argument('--force', action='store_true', help='Bypass interval throttle and check immediately')
     p = sub.add_parser('install-cli', help='Install the official CLI statusLine adapter independently of desktop')
@@ -335,6 +507,8 @@ def main():
         elif args.action == 'disable': set_enabled(False)
         elif args.action == 'uninstall': uninstall()
         elif args.action == 'status': status()
+        elif args.action == 'launch': launch(args.restart)
+        elif args.action == 'install-launcher': install_launcher()
         elif args.action == 'package': package(args.output)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f'Antigrative Dashboard: {error}', file=sys.stderr)
