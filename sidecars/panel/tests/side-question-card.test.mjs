@@ -875,3 +875,125 @@ test('missing auxTaskProgress clears stale inline card in split /btw pane', asyn
     assert.equal(Boolean(sideResp.stepList.querySelector('.ag-pulse-inline-chat-host')), false, 'Stale aux card must be cleared when auxTaskProgress is absent');
   });
 });
+
+test('new turn removes unfinished inline card stuck on previous response while keeping completed recap', async () => {
+  const convId = '33333333-3333-3333-3333-333333333333';
+  let turnPhase = 1;
+  await withMockBrowser(() => createTestDom({ pathname: `/c/${convId}` }), async ({ win, doc, MiniElement, makeComposer, makeResponse }) => {
+    const view = new MiniElement('div', { 'data-testid': 'conversation-view', 'data-cascade-id': convId });
+    const resp1 = makeResponse();
+    const comp = makeComposer(true);
+    view.append(resp1.resp, comp.box);
+    doc.body.append(view);
+    doc.activeElement = comp.editor;
+
+    win.agPulseHost = {
+      getPreferences: async () => ({ language: 'zh-CN', languageGuideDismissed: true, usageGuideDismissed: true, revision: 1 }),
+      setPreferences: async i => i,
+      report: () => {},
+      getMetrics: async () => ({
+        connection: 'live',
+        groups: [],
+        speed: null,
+        taskProgress: turnPhase === 1
+          ? {
+              status: 'running',
+              progressPercent: 30,
+              turnStepIdx: 10,
+              showInlineCard: true,
+              steps: [
+                { id: 1, title: '探测导出包', status: 'running', percent: 50 },
+                { id: 2, title: '提取短消息', status: 'pending', percent: 0 },
+              ],
+            }
+          : turnPhase === 2
+            ? {
+                status: 'running',
+                progressPercent: 10,
+                turnStepIdx: 12,
+                showInlineCard: false,
+                steps: [],
+              }
+            : {
+                status: 'completed',
+                progressPercent: 100,
+                turnStepIdx: 10,
+                showInlineCard: true,
+                steps: [
+                  { id: 1, title: '已完成步骤 A', status: 'completed', percent: 100 },
+                  { id: 2, title: '已完成步骤 B', status: 'completed', percent: 100 },
+                ],
+              },
+      }),
+    };
+
+    installWidget();
+    await new Promise(r => setTimeout(r, 30));
+    assert.ok(resp1.stepList.querySelector('.ag-pulse-inline-chat-host'), 'Turn 1 unfinished card must render initially');
+
+    // 新一轮消息发出且底部出现第二个 Working 气泡，resp1 上的未完成卡片必须被清理
+    const resp2 = makeResponse();
+    view.insertBefore(resp2.resp, comp.box);
+    turnPhase = 2;
+    await new Promise(r => setTimeout(r, 1300));
+    assert.equal(Boolean(resp1.stepList.querySelector('.ag-pulse-inline-chat-host')), false, 'Unfinished card on previous response must be removed when a new turn starts');
+
+    // 若上一轮卡片已经全部完成（无 running/pending/stalled），开启新回复时应保留已完成的复盘卡片
+    const completedViewResp1 = makeResponse();
+    resp1.resp.remove();
+    resp2.resp.remove();
+    view.insertBefore(completedViewResp1.resp, comp.box);
+    turnPhase = 3;
+    await new Promise(r => setTimeout(r, 1300));
+    assert.ok(completedViewResp1.stepList.querySelector('.ag-pulse-inline-chat-host'), 'Completed card renders on turn 1');
+
+    const resp3 = makeResponse();
+    view.insertBefore(resp3.resp, comp.box);
+    turnPhase = 2;
+    await new Promise(r => setTimeout(r, 1300));
+    assert.ok(completedViewResp1.stepList.querySelector('.ag-pulse-inline-chat-host'), 'All-completed recap card may remain on previous response');
+  });
+});
+
+test('null taskProgress or empty new conversation scope clears stale card without cascade id', async () => {
+  let hasProgress = true;
+  await withMockBrowser(() => createTestDom({ pathname: '/' }), async ({ win, doc, MiniElement, makeComposer, makeResponse }) => {
+    const view = new MiniElement('div', { 'data-testid': 'conversation-view' });
+    const resp1 = makeResponse();
+    const comp = makeComposer(true);
+    view.append(resp1.resp, comp.box);
+    doc.body.append(view);
+    doc.activeElement = comp.editor;
+
+    win.agPulseHost = {
+      getPreferences: async () => ({ language: 'zh-CN', languageGuideDismissed: true, usageGuideDismissed: true, revision: 1 }),
+      setPreferences: async i => i,
+      report: () => {},
+      getMetrics: async () => ({
+        connection: 'live',
+        groups: [],
+        speed: null,
+        taskProgress: hasProgress
+          ? {
+              status: 'running',
+              progressPercent: 40,
+              turnStepIdx: 1,
+              showInlineCard: true,
+              steps: [
+                { id: 1, title: '步骤 1', status: 'running', percent: 50 },
+                { id: 2, title: '步骤 2', status: 'pending', percent: 0 },
+              ],
+            }
+          : null,
+      }),
+    };
+
+    installWidget();
+    await new Promise(r => setTimeout(r, 30));
+    assert.ok(resp1.stepList.querySelector('.ag-pulse-inline-chat-host'));
+
+    hasProgress = false;
+    await new Promise(r => setTimeout(r, 1300));
+    assert.equal(Boolean(resp1.stepList.querySelector('.ag-pulse-inline-chat-host')), false, 'Stale card must clear when taskProgress becomes null even without data-cascade-id');
+  });
+});

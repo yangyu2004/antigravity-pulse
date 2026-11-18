@@ -796,10 +796,12 @@ export class TaskMonitor {
 
         if (step.type === 'USER_INPUT' && step.source === 'USER_EXPLICIT') {
           if (stepIdx !== cache.turnStepIdx) {
+            const hasPrevTurn = cache.turnStepIdx >= 0;
             if (cache.turnEndMs > 0) cache.prevTurnEndMs = cache.turnEndMs;
-            else if (stepTs > 0 && cache.turnStartMs > 0) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, stepTs - 200);
+            else if (hasPrevTurn && cache.lastGrowthMs > 0 && (!stepTs || stepTs < cache.lastGrowthMs)) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, cache.lastGrowthMs);
+            else if (hasPrevTurn && stepTs > 0 && cache.turnStartMs > 0) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, stepTs - 200);
             cache.turnStepIdx = stepIdx;
-            cache.turnStartMs = stepTs || now;
+            cache.turnStartMs = stepTs > 0 ? Math.max(stepTs, hasPrevTurn ? (cache.prevTurnEndMs || 0) : 0) : now;
             cache.turnEndMs = 0;
             cache.lastErrorMs = 0;
             cache.lastStepFinished = false;

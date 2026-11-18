@@ -1032,25 +1032,42 @@ module.exports = function installAgPulseInlineWidget() {
       if(host.closest('[data-testid="side-question-tab-conversation"],[data-testid="conversation-view"]')===convScope)host.remove();
     }
   }
+  function isCardHostUnfinished(host){
+    const sr=host?.shadowRoot;
+    if(!sr)return false;
+    if(sr.querySelector('.ic-step.running,.ic-step.stalled,.ic-step.pending'))return true;
+    const bar=sr.getElementById('ic-stalled-bar');
+    return Boolean(bar&&!bar.hidden);
+  }
+  function pruneSupersededCards(convScope,lastResponse,keepHost){
+    if(!convScope)return;
+    for(const host of convScope.querySelectorAll('.ag-pulse-inline-chat-host')){
+      if(host===keepHost)continue;
+      if(host.closest('[data-testid="side-question-tab-conversation"],[data-testid="conversation-view"]')!==convScope)continue;
+      if(lastResponse?.contains(host)||isCardHostUnfinished(host))host.remove();
+    }
+  }
   function renderCardInScope(convScope,tp){
     if(!convScope||!tp)return;
     const isSideTab=Boolean(convScope.matches?.('[data-testid="side-question-tab-conversation"]'));
     const responses=Array.from(convScope.querySelectorAll('[data-testid="agent-response"]')).filter(el=>el.isConnected&&!el.closest('[hidden],[inert],[data-testid="subagent-tab-conversation"]')&&(isSideTab||!el.closest('[data-testid="side-question-tab-conversation"]'))&&getComputedStyle(el).display!=='none');
     const lastResponse=responses[responses.length-1];
-    if(!lastResponse)return;
+    if(!lastResponse){clearCardInScope(convScope);return;}
     const turnIdx=Number.isFinite(tp.turnStepIdx)?tp.turnStepIdx:-1;
     const bodyDiv=lastResponse.hasAttribute('data-step-rows')?lastResponse:(lastResponse.querySelector(':scope > [data-step-list]')||lastResponse.children[1]||lastResponse);
     let chatHost=Array.from(bodyDiv.children).find(c=>c.classList?.contains('ag-pulse-inline-chat-host'));
+    pruneSupersededCards(convScope,lastResponse,chatHost||null);
     if(!tp.showInlineCard||!Array.isArray(tp.steps)||tp.steps.length<2){
       if(tp.status==='idle'&&turnIdx>=0&&!lastResponse.dataset.agPulseTurn){
         lastResponse.dataset.agPulseTurn=String(turnIdx);
       }
-      if(chatHost&&Number(chatHost.dataset.turnIdx)===turnIdx)chatHost.remove();
+      if(chatHost&&(Number(chatHost.dataset.turnIdx)===turnIdx||isCardHostUnfinished(chatHost)))chatHost.remove();
       return;
     }
     const boundTurn=Number(chatHost?.dataset.turnIdx??lastResponse.dataset.agPulseTurn??-1);
     if(boundTurn>=0&&turnIdx>=0&&boundTurn!==turnIdx){
-      // 新一轮刚发出但宿主的最新 agent-response 气泡尚未挂载，保留上一轮卡片不动
+      // 新一轮刚发出但宿主的最新 agent-response 气泡尚未挂载：清掉旧轮未完成卡片，避免旋转状态冻结在上一条回答上
+      if(chatHost&&isCardHostUnfinished(chatHost))chatHost.remove();
       return;
     }
     lastResponse.dataset.agPulseTurn=String(turnIdx);
@@ -1117,8 +1134,9 @@ module.exports = function installAgPulseInlineWidget() {
   function renderInlineChatCard(tp){
     const {scope,isGenuineSubagentSidebar,scopes}=resolvePrimaryCardScope();
     const activeConv=(node?.isConnected?conversationId():null)||scopes[0]?.id||null;
-    if(tp&&!isGenuineSubagentSidebar&&scope){
-      renderCardInScope(scope,tp);
+    if(scope){
+      if(tp&&!isGenuineSubagentSidebar)renderCardInScope(scope,tp);
+      else clearCardInScope(scope);
     }
     const auxMap=data?.auxTaskProgress;
     for(const entry of scopes){

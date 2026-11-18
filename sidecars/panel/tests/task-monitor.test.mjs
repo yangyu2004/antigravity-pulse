@@ -459,3 +459,43 @@ test('running background task (1 task running) keeps board running below 100% un
     await rm(brainRoot, { recursive: true, force: true });
   }
 });
+
+test('queued USER_INPUT with earlier timestamp clamps turnStartMs to prevTurnEndMs and ignores old task_steps', async () => {
+  const brainRoot = await mkdtemp(join(tmpdir(), 'pulse-tm-queued-'));
+  try {
+    const now = Date.now();
+    const prevStart = now - 35_000;
+    const queuedAt = prevStart + 1_000; // 用户在上一轮刚开始 1s 时就排队发了下一条
+    const prevEnd = now - 3_000;        // 上一轮在 3s 前才完成
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(prevStart).toISOString(), content: '<USER_REQUEST>\n检查导出压缩包\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(prevStart + 2_000).toISOString(), tool_calls: [{ name: 'write_file', args: { Path: '/tmp/task_steps.json' } }] },
+        { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(prevEnd).toISOString(), content: '检查完成。', tool_calls: [] },
+        { step_index: 3, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(queuedAt).toISOString(), content: '<USER_REQUEST>\n导出已完成，开始抽取\n</USER_REQUEST>' },
+      ],
+      transcriptMtimeMs: now - 1_000,
+      taskSteps: {
+        objective: '旧轮次步骤',
+        steps: [
+          { id: 1, title: '探测微信导出', status: 'running' },
+          { id: 2, title: '生成词库', status: 'pending' },
+        ],
+      },
+      // task_steps.json 是在上一轮中期写入的，比 queuedAt 晚，但早于 prevEnd
+      taskStepsMtimeMs: prevStart + 5_000,
+    });
+
+    const monitor = new TaskMonitor({ brainRoot });
+    const snap = await monitor.snapshot(ROOT_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now - 1_000, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(snap.status, 'running');
+    assert.equal(snap.turnStepIdx, 3);
+    assert.equal(snap.showInlineCard, false, 'Old turn task_steps.json must not leak into queued new turn');
+    assert.ok(snap.elapsedSeconds <= 6, `Expected elapsedSeconds clamped near prevEnd (<=6s), got ${snap.elapsedSeconds}`);
+  } finally {
+    await rm(brainRoot, { recursive: true, force: true });
+  }
+});

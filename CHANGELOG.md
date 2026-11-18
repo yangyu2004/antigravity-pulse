@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.9 — 2026-11-18
+
+- **修复开启新轮对话或切换空会话时上一条回答仍残留未完成卡片的 Bug**：
+  - 在 `compat/inline-widget.cjs` 新增 `isCardHostUnfinished()` 与 `pruneSupersededCards()`，当新回复挂载（含底部显示 `Working`、`showInlineCard: false` 或轮次 `turnStepIdx` 已切换）时，自动清理早期回答上尚未完成的 `.ag-pulse-inline-chat-host` 卡片（保留已全部 `completed` 的历史复盘卡片）。
+  - 修复空白新会话（无 `data-cascade-id`）以及 `taskProgress === null` 或 `!lastResponse` 时未调用 `clearCardInScope(scope)` 导致旧卡片残留的边界问题。
+- **修复上一轮提前排队消息导致新一轮计时与旧 `task_steps.json` 串联的 Bug**：
+  - 修复 `sidecars/panel/task-monitor.mjs` 中 `USER_INPUT` 的时间下界判定：若已存在上一轮（`turnStepIdx >= 0`），提前排队输入（`created_at` 早于上一轮结束时间）的 `turnStartMs` 将钳位至 `prevTurnEndMs`（且不早于 `lastGrowthMs`），防止误继承上一轮的 `task_steps.json` 并保证耗时从新轮实际开始归零计时。
+
 ## 0.9.8 — 2026-11-18
 
 - **适配 Antigravity 2.33.0+ 默认关闭 CDP 调试端口的变更**：
