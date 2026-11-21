@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Antigrative Dashboard</title>
   <link rel="stylesheet" href="/theme.css?v=sidebar-layout-3">
   <link rel="stylesheet" href="/styles.css?v=sidebar-layout-3">
@@ -20,11 +22,11 @@
   </svg>
   <main class="widget" data-i18n-aria="strip" aria-label="Antigrative Dashboard statistics">
     <header class="widget-header">
-      <div class="brand"><svg class="icon"><use href="#pulse"/></svg><span>Antigrative Dashboard</span><span class="connection-dot" id="connection-dot"></span></div>
+      <div class="brand"><svg class="icon" aria-hidden="true"><use href="#pulse"/></svg><span>Antigrative Dashboard</span><span class="connection-dot" id="connection-dot"></span></div>
       <div class="header-controls">
         <label class="sr-only" for="quota-group"><span data-i18n="group">Quota group</span></label>
-        <button class="icon-button" id="language-toggle" type="button" data-i18n-aria="language" aria-label="Language" title="Switch to Chinese">EN</button><select id="quota-group" data-i18n-aria="group" aria-label="Quota group"><option value=""><span data-i18n="loadingQuota">Loading quota…</span></option></select>
-        <button class="icon-button" id="refresh-button" type="button" data-i18n-aria="refreshStats" aria-label="Refresh statistics" title="Refresh statistics"><svg class="icon"><use href="#refresh"/></svg></button>
+        <button class="icon-button" id="language-toggle" type="button" data-i18n-aria="language" aria-label="Language" title="Switch to Chinese">EN</button><select id="quota-group" data-i18n-aria="group" aria-label="Quota group"><option value="" data-i18n="loadingQuota">Loading quota…</option></select>
+        <button class="icon-button" id="refresh-button" type="button" data-i18n-aria="refreshStats" aria-label="Refresh statistics" title="Refresh statistics"><svg class="icon" aria-hidden="true"><use href="#refresh"/></svg></button>
       </div>
     </header>
     <p class="sampled-model"><span data-i18n="contextModel">Sampled model</span><span id="strip-model">—</span></p>

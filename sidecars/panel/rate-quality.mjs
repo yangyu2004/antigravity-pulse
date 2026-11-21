@@ -3,7 +3,7 @@
 export const RATE_VERSION = 2;
 export const RATE_REASONS = ['token-scope', 'duplicate-scope', 'retry-scope', 'short-tool-window', 'short-outlier', 'nonfinite-rate'];
 const median = values => {
-  const sorted = [...values].sort((a,b)=>a-b), mid = Math.floor(sorted.length / 2);
+  const sorted = values.toSorted((a,b)=>a-b), mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
 };
 

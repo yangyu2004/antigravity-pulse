@@ -157,7 +157,7 @@ export function trajectoryMetrics(response) {
   const tools = steps.filter(s => /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type || '')) || s.metadata?.toolCall);
   const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata.startedAt || s.metadata.createdAt), Date.parse(s.metadata.completedAt)]));
   const latest = samples.at(-1) || null;
-  const lastChat = [...generators].reverse().find(g => g.chatModel)?.chatModel;
+  const lastChat = generators.findLast(g => g.chatModel)?.chatModel;
   const chatModelLabel = chat => chat?.modelDisplayName || chat?.responseModel || String(chat?.model || chat?.usage?.model || '');
   const sameModelAs = (a, b) => {
     if (!a || !b) return false;
@@ -166,11 +166,11 @@ export function trajectoryMetrics(response) {
     return Boolean(a.model && b.model && String(a.model) === String(b.model));
   };
   let ctxGen = null;
-  const lastGenWithChat = [...generators].reverse().find(g => g?.chatModel) || null;
+  const lastGenWithChat = generators.findLast(g => g?.chatModel) || null;
   if (lastGenWithChat && tokenCount(lastGenWithChat.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null) {
     ctxGen = lastGenWithChat;
   } else if (lastGenWithChat && !lastGenWithChat.chatModel?.usage) {
-    const prevWithCtx = [...generators].reverse().find(g => tokenCount(g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null);
+    const prevWithCtx = generators.findLast(g => tokenCount(g?.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) !== null);
     if (prevWithCtx && sameModelAs(lastGenWithChat.chatModel, prevWithCtx.chatModel)) ctxGen = prevWithCtx;
   }
   const isDoneCheckpoint = step =>
