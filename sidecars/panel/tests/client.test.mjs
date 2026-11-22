@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import http from 'node:http';
 import {syncBuiltinESMExports} from 'node:module';
 import {EventEmitter} from 'node:events';
-import {AntigravityClient} from '../client.mjs';
+import {AntigravityClient, endpointFromEnv, serverFromDiscovery} from '../client.mjs';
 
 // Synthetic RPC fixtures own every accepted socket. End them explicitly:
 // HTTP keep-alive teardown must not hold the cross-platform test runner open.
@@ -34,7 +34,7 @@ async function fixture(t){
  const server=createServer((req,res)=>{state.requests++;req.resume();res.writeHead(state.status,{'Content-Type':'application/json'});res.end(state.body);});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>stopServer(server));
  state.port=server.address().port;state.pid=42;
- const client=new AntigravityClient({now:()=>state.now,paths:()=>({log:'fixture'}),readLog:async()=>`listening on random port at ${state.port} for HTTP\n`,
+ const client=new AntigravityClient({now:()=>state.now,env:{},paths:()=>({log:'fixture'}),readLog:async()=>`listening on random port at ${state.port} for HTTP\n`,
   processes:async()=>{state.scans++;return [{ProcessId:state.pid,CommandLine:'language_server --standalone --csrf_token=fixture',Ports:[state.port]}];}});
  return {client,state,server};
 }
@@ -78,7 +78,7 @@ test('conversation-list RPC keeps delegation metadata while discarding embedded 
 
 test('cold-start discovery failures coalesce and back off while the backend starts',async()=>{
  let now=0,scans=0,ready=false;
- const client=new AntigravityClient({now:()=>now,paths:()=>({log:'fixture'}),readLog:async()=> 'listening on random port at 1234 for HTTP\n',
+ const client=new AntigravityClient({now:()=>now,env:{},paths:()=>({log:'fixture'}),readLog:async()=> 'listening on random port at 1234 for HTTP\n',
   processes:async()=>{scans++;return ready?[{ProcessId:42,CommandLine:'language_server --standalone --csrf_token=fixture',Ports:[1234]}]:[];}});
  await Promise.allSettled(Array.from({length:20},()=>client.discover()));assert.equal(scans,1);
  for(let i=0;i<20;i++)await assert.rejects(client.discover());assert.equal(scans,1);
@@ -104,4 +104,130 @@ test('a refused old port rediscovers a restarted backend once, without toggling 
  state.port=replacement.address().port;state.pid=43;state.now+=3000;
  assert.deepEqual(await client.call('GetUserStatus'),{});
  assert.equal(client.server.pid,43);assert.equal(state.scans,2);
+});
+
+test('endpointFromEnv accepts loopback HTTP addresses only and rejects unsafe values', () => {
+ assert.deepEqual(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'localhost:62465', ANTIGRAVITY_CSRF_TOKEN: 'tok-1' }), { port: 62465, csrf: 'tok-1' });
+ assert.deepEqual(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'http://127.0.0.1:8080', ANTIGRAVITY_CSRF_TOKEN: 'tok-2' }), { port: 8080, csrf: 'tok-2' });
+ assert.deepEqual(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: '[::1]:9000', ANTIGRAVITY_CSRF_TOKEN: 'tok-3' }), { host: '::1', port: 9000, csrf: 'tok-3' });
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'https://127.0.0.1:62464', ANTIGRAVITY_CSRF_TOKEN: 'tok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: '192.168.1.5:62465', ANTIGRAVITY_CSRF_TOKEN: 'tok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'evil.example:62465', ANTIGRAVITY_CSRF_TOKEN: 'tok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'localhost:0', ANTIGRAVITY_CSRF_TOKEN: 'tok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'localhost:70000', ANTIGRAVITY_CSRF_TOKEN: 'tok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'localhost:62465', ANTIGRAVITY_CSRF_TOKEN: 'bad\r\ntok' }), null);
+ assert.equal(endpointFromEnv({ ANTIGRAVITY_LS_ADDRESS: 'localhost:62465' }), null);
+});
+
+test('2.34.0+ sidecar env credential pairs only with the live standalone process owning its port', async t => {
+ let receivedCsrf = null;
+ const srv = createServer((req, res) => {
+  receivedCsrf = req.headers['x-codeium-csrf-token'];
+  req.resume();
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end('{"ok":true}');
+ });
+ await new Promise(r => srv.listen(0, '127.0.0.1', r));
+ t.after(() => stopServer(srv));
+ const port = srv.address().port;
+
+ // 2.34.0+ hides --csrf_token from CLI argv; works even if language_server.log is missing
+ const env = { ANTIGRAVITY_LS_ADDRESS: `localhost:${port}`, ANTIGRAVITY_CSRF_TOKEN: 'env-token-234' };
+ const client = new AntigravityClient({
+  now: () => 1000,
+  env,
+  paths: () => ({ logCandidates: ['missing.log'] }),
+  readLog: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+  processes: async () => [{ ProcessId: 77, CommandLine: '/app/language_server --standalone --override_ide_version 2.34.0 --enable_sidecars', Ports: [port, port - 1] }],
+ });
+ assert.deepEqual(await client.call('GetUserStatus'), { ok: true });
+ assert.equal(receivedCsrf, 'env-token-234');
+ assert.deepEqual(client.server, { port, csrf: 'env-token-234', pid: 77 });
+
+ // Stale sidecar env port (LS restarted on a different port) must never mix generations
+ assert.throws(
+  () => serverFromDiscovery(
+   `listening on random port at ${port + 1} for HTTP\n`,
+   [{ ProcessId: 88, CommandLine: '/app/language_server --standalone --enable_sidecars', Ports: [port + 1] }],
+   env,
+  ),
+  /已重启/,
+ );
+
+ // Multiple standalone instances must still fail closed even when env matches one
+ assert.throws(
+  () => serverFromDiscovery(
+   `listening on random port at ${port} for HTTP\n`,
+   [
+    { ProcessId: 77, CommandLine: '/app/language_server --standalone', Ports: [port] },
+    { ProcessId: 78, CommandLine: '/app/language_server --standalone', Ports: [port + 2] },
+   ],
+   env,
+  ),
+  /多个 Antigravity 实例/,
+ );
+
+ // Legacy <= 2.33.0 argv --csrf_token takes precedence over stale env token (both serverFromDiscovery and client.discover)
+ assert.deepEqual(
+  serverFromDiscovery(
+   `listening on random port at ${port + 5} for HTTP\n`,
+   [{ ProcessId: 90, CommandLine: '/app/language_server --standalone --csrf_token=fresh-cli', Ports: [port + 5] }],
+   env,
+  ),
+  { port: port + 5, csrf: 'fresh-cli', pid: 90 },
+ );
+ const cliClient = new AntigravityClient({
+  now: () => 2000,
+  env,
+  paths: () => ({ logCandidates: ['live.log'] }),
+  readLog: async () => `listening on random port at ${port + 5} for HTTP\n`,
+  processes: async () => [{ ProcessId: 90, CommandLine: '/app/language_server --standalone --csrf_token=fresh-cli', Ports: [port, port + 5] }],
+ });
+ assert.deepEqual(await cliClient.discover(), { port: port + 5, csrf: 'fresh-cli', pid: 90 });
+
+ // Multiple standalone instances reject in discover() fast path too even when env matches one
+ const multiClient = new AntigravityClient({
+  now: () => 3000,
+  env,
+  paths: () => ({ logCandidates: ['live.log'] }),
+  readLog: async () => `listening on random port at ${port} for HTTP\n`,
+  processes: async () => [
+   { ProcessId: 77, CommandLine: '/app/language_server --standalone', Ports: [port] },
+   { ProcessId: 78, CommandLine: '/app/language_server --standalone', Ports: [port + 2] },
+  ],
+ });
+ await assert.rejects(multiClient.discover(), /多个 Antigravity 实例/);
+
+ // IPv6 [::1] env endpoint passes hostname '::1' end-to-end to http.request
+ const originalReq = http.request;
+ let seenOptions = null;
+ http.request = (options, onResponse) => {
+  seenOptions = options;
+  const req = new EventEmitter();
+  req.setTimeout = () => req;
+  req.destroy = () => { req.emit('close'); return req; };
+  req.end = () => queueMicrotask(() => {
+   const res = new EventEmitter();
+   res.statusCode = 200;
+   res.setEncoding = () => res;
+   onResponse(res);
+   res.emit('data', '{"ipv6":true}');
+   res.emit('end');
+   req.emit('close');
+  });
+  return req;
+ };
+ syncBuiltinESMExports();
+ t.after(() => { http.request = originalReq; syncBuiltinESMExports(); });
+ const v6Client = new AntigravityClient({
+  now: () => 4000,
+  env: { ANTIGRAVITY_LS_ADDRESS: '[::1]:64001', ANTIGRAVITY_CSRF_TOKEN: 'v6-tok' },
+  paths: () => ({ logCandidates: ['missing.log'] }),
+  readLog: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+  processes: async () => [{ ProcessId: 99, CommandLine: '/app/language_server --standalone', Ports: [64001] }],
+ });
+ assert.deepEqual(await v6Client.call('GetUserStatus'), { ipv6: true });
+ assert.equal(seenOptions.hostname, '::1');
+ assert.equal(seenOptions.port, 64001);
+ assert.equal(seenOptions.headers['x-codeium-csrf-token'], 'v6-tok');
 });

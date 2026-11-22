@@ -560,8 +560,8 @@ module.exports = function installAgPulseInlineWidget() {
       const activeEditors=Array.from(box.querySelectorAll('[contenteditable="true"]')).filter(e=>owned(e)&&visible(e));
       if(!activeEditors.includes(editor)||activeEditors.length!==1)continue;
       if(Array.from(box.querySelectorAll('[data-testid="model-selector-trigger"]')).some(e=>owned(e)&&visible(e)))continue;
-      const controls=Array.from(box.querySelectorAll('[data-testid="send-button"],[data-tooltip-id*="send-button"],[data-testid="stop-button"],[data-testid="cancel-button"],button[aria-label]'))
-        .filter(e=>owned(e)&&visible(e)&&(e.hasAttribute('data-testid')&&/^(send|stop|cancel)-button$/.test(e.dataset.testid)||e.getAttribute('data-tooltip-id')?.includes('send-button')||/^(?:cancel|stop|取消|停止)(?:\b|\s|生成|任务|响应|$)/i.test(e.getAttribute('aria-label')||'')));
+      const controls=Array.from(box.querySelectorAll('[data-testid="input-send-button"],[data-testid="send-button"],[data-tooltip-id*="send-button"],[data-testid="input-stop-button"],[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"],button[aria-label]'))
+        .filter(e=>owned(e)&&visible(e)&&(e.hasAttribute('data-testid')&&/^(?:input-)?(send|stop|cancel)-button$/.test(e.dataset.testid)||e.getAttribute('data-tooltip-id')?.includes('send-button')||/^(?:cancel|stop|取消|停止)(?:\b|\s|生成|任务|响应|$)/i.test(e.getAttribute('aria-label')||'')));
       for(const send of controls){
         let row=send.parentElement,distance=1;
         while(row?.parentElement&&row.parentElement!==box&&!row.parentElement.contains(editor)){row=row.parentElement;distance++;}

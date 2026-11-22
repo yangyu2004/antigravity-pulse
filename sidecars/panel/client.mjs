@@ -6,19 +6,42 @@ import { TrajectoryJson } from './trajectory-json.mjs';
 import { TrajectoryReader } from './trajectory-reader.mjs';
 
 const SERVICE = '/exa.language_server_pb.LanguageServerService/';
-export function serverFromDiscovery(log, processes) {
+export function endpointFromEnv(env = null) {
+  if (!env || typeof env !== 'object') return null;
+  const rawAddr = typeof env.ANTIGRAVITY_LS_ADDRESS === 'string' ? env.ANTIGRAVITY_LS_ADDRESS.trim() : '';
+  const csrf = typeof env.ANTIGRAVITY_CSRF_TOKEN === 'string' ? env.ANTIGRAVITY_CSRF_TOKEN.trim() : '';
+  if (!rawAddr || !csrf || !/^[\x21-\x7e]+$/.test(csrf)) return null;
+  const match = rawAddr.match(/^(?:http:\/\/)?(127\.0\.0\.1|localhost|\[::1\]):(\d+)$/i);
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const host = match[1] === '[::1]' ? '::1' : '127.0.0.1';
+  return host === '127.0.0.1' ? { port, csrf } : { host, port, csrf };
+}
+export function serverFromDiscovery(log, processes, env = null) {
   const rows = (Array.isArray(processes) ? processes : [processes]).filter(p => /--standalone\b/.test(p.CommandLine || ''));
   if (rows.length !== 1) throw new Error(rows.length ? '检测到多个 Antigravity 实例，请保留一个' : '未找到 Antigravity 桌面后台');
   const ports = new Set([rows[0].Ports].flat().map(Number));
+  const cliCsrf = rows[0].CommandLine.match(/--csrf_token(?:=|\s+)"?([^\s"]+)/)?.[1];
+  if (cliCsrf) {
+    const port = [...log.matchAll(/listening on random port at (\d+) for HTTP(?:\s|$)/g)].reverse().map(m=>Number(m[1])).find(p=>ports.has(p));
+    if (!port) throw new Error('等待 Antigravity 本地接口启动');
+    return {port,csrf:cliCsrf,pid:rows[0].ProcessId};
+  }
+  // Antigravity 2.34.0+ passes the CSRF token via child env rather than CLI argv.
+  // Pair the official Sidecar env endpoint ONLY when its loopback port is owned
+  // by the current standalone language_server process (prevents mixing generations).
+  const envEp = endpointFromEnv(env);
+  if (envEp && ports.has(envEp.port)) {
+    return {...envEp,pid:rows[0].ProcessId};
+  }
   const port = [...log.matchAll(/listening on random port at (\d+) for HTTP(?:\s|$)/g)].reverse().map(m=>Number(m[1])).find(p=>ports.has(p));
   if (!port) throw new Error('等待 Antigravity 本地接口启动');
-  const csrf = rows[0].CommandLine.match(/--csrf_token(?:=|\s+)"?([^\s"]+)/)?.[1];
-  if (!csrf) throw new Error('当前版本未提供可用的本地检测凭据');
-  return {port,csrf,pid:rows[0].ProcessId};
+  throw new Error(envEp ? 'Antigravity 后台已重启，等待新 Sidecar 接管' : '当前版本未提供可用的本地检测凭据');
 }
 export class AntigravityClient {
-  constructor({paths=platformPaths,readLog=readFile,processes=discoverProcesses,now=Date.now,onRpc=null}={}) {
-    this.paths=paths;this.readLog=readLog;this.processes=processes;this.now=now;this.onRpc=onRpc;this.reader=new TrajectoryReader(this);
+  constructor({paths=platformPaths,readLog=readFile,processes=discoverProcesses,now=Date.now,onRpc=null,env=process.env}={}) {
+    this.paths=paths;this.readLog=readLog;this.processes=processes;this.now=now;this.onRpc=onRpc;this.env=env;this.reader=new TrajectoryReader(this);
   }
   server = null;
   discoveredAt = 0;
@@ -50,13 +73,27 @@ export class AntigravityClient {
     const parsed = await this.processes();
     if (!parsed || Array.isArray(parsed) && !parsed.length) throw new Error('请先打开 Antigravity');
     // Credentials stay in process memory. They are never logged, persisted, or
-    // returned to a browser; all calls go exclusively to 127.0.0.1.
+    // returned to a browser; all calls go exclusively to loopback.
+    // On Antigravity 2.34.0+, the standalone language_server hides --csrf_token
+    // from CLI argv and injects ANTIGRAVITY_LS_ADDRESS + ANTIGRAVITY_CSRF_TOKEN
+    // directly into its Sidecar children. Verify the single standalone process
+    // owns that exact loopback port before accepting it without log scraping.
+    const standalone = (Array.isArray(parsed) ? parsed : [parsed]).filter(p => /--standalone\b/.test(p.CommandLine || ''));
+    const envEp = endpointFromEnv(this.env);
+    if (standalone.length === 1 && !/--csrf_token(?:=|\s+)/.test(standalone[0].CommandLine || '') && envEp) {
+      const ports = new Set([standalone[0].Ports].flat().map(Number));
+      if (ports.has(envEp.port)) {
+        this.server = { ...envEp, pid: standalone[0].ProcessId };
+        this.discoveredAt = this.now();
+        return this.server;
+      }
+    }
     let foundLog=false,lastError=null;
     const paths=this.paths();
     for(const file of paths.logCandidates||[paths.log]) {
       try {
         const log=await this.readLog(file,'utf8');foundLog=true;
-        this.server=serverFromDiscovery(log,parsed);break;
+        this.server=serverFromDiscovery(log,parsed,this.env);break;
       } catch(error) {
         if(error.code!=='ENOENT'&&error.code!=='ENOTDIR')lastError=error;
       }
@@ -75,7 +112,7 @@ export class AntigravityClient {
         const started=this.now();
         // A rejected stream destroys its socket. Do not leave that socket in
         // the shared agent where an immediate quota refresh could reuse it.
-        const req = request({ hostname: '127.0.0.1', port: server.port, method: 'POST', path: SERVICE + method, ...(projection?{agent:false}:{}),
+        const req = request({ hostname: server.host || '127.0.0.1', port: server.port, method: 'POST', path: SERVICE + method, ...(projection?{agent:false}:{}),
           headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', 'x-codeium-csrf-token': server.csrf, 'Content-Length': Buffer.byteLength(data) } }, res => {
           const projected=projection?new TrajectoryJson():null;
           let text = '',bytes=0,failed=false;

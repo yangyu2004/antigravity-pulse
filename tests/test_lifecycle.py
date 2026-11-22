@@ -184,5 +184,103 @@ class LifecycleTests(unittest.TestCase):
                 self.assertTrue((launcher / 'Contents' / 'MacOS' / 'launch').is_file())
                 script_text = (launcher / 'Contents' / 'MacOS' / 'launch').read_text(encoding='utf-8')
                 self.assertIn('--remote-debugging-port=0 --remote-debugging-address=127.0.0.1', script_text)
+                manager.remove_launcher()
+                self.assertFalse(launcher.exists())
+            win_exe = self.home / 'WinApp' / 'Antigravity.exe'
+            win_asar = self.home / 'WinApp' / 'resources' / 'app.asar'
+            win_asar.parent.mkdir(parents=True)
+            win_exe.write_bytes(b'exe')
+            win_asar.write_bytes(b'asar')
+            (self.home / 'Desktop').mkdir(exist_ok=True)
+            start_menu = self.home / 'AppData' / 'Roaming' / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs'
+            start_menu.mkdir(parents=True, exist_ok=True)
+            created_lnks = []
+            def fake_win_lnk(lnk_path, target, arguments):
+                created_lnks.append((lnk_path, target, arguments))
+                lnk_path.write_text(f'{target} {arguments}', encoding='utf-8')
+            with patch.multiple(manager, HOME=self.home, APP=win_asar), \
+                 patch('sys.platform', 'win32'), \
+                 patch.object(manager, '_create_windows_shortcut', side_effect=fake_win_lnk):
+                win_launcher = manager.install_launcher()
+                self.assertEqual(win_launcher, self.home / 'Desktop' / 'Antigravity (Pulse).lnk')
+                self.assertEqual(len(created_lnks), 2)
+                for _, target, arguments in created_lnks:
+                    self.assertEqual(target, win_exe)
+                    self.assertEqual(arguments, '--remote-debugging-port=0 --remote-debugging-address=127.0.0.1')
+                manager.remove_launcher()
+                self.assertFalse((self.home / 'Desktop' / 'Antigravity (Pulse).lnk').exists())
+                self.assertFalse((start_menu / 'Antigravity (Pulse).lnk').exists())
+
+            # Verify _create_windows_shortcut passes values via env vars (safe against curly quotes/special chars)
+            with patch('subprocess.run') as mock_ps:
+                manager._create_windows_shortcut(self.home / "O’Brien" / 'Antigravity (Pulse).lnk', win_exe, '--remote-debugging-port=0')
+                mock_ps.assert_called_once()
+                _, ps_kwargs = mock_ps.call_args
+                self.assertEqual(ps_kwargs['timeout'], 30)
+                self.assertEqual(ps_kwargs['env']['AGP_LNK_TARGET'], str(win_exe))
+                self.assertIn("O’Brien", ps_kwargs['env']['AGP_LNK_PATH'])
+                self.assertNotIn("O’Brien", mock_ps.call_args[0][0][-1])
+
+            # Windows with missing Desktop & Start Menu dirs returns None (never returns raw Antigravity.exe)
+            empty_home = self.home / 'empty_win_home'
+            empty_home.mkdir()
+            with patch.multiple(manager, HOME=empty_home, APP=win_asar), patch('sys.platform', 'win32'):
+                self.assertIsNone(manager.install_launcher(quiet=True))
+
+    def test_install_auto_launcher_and_failure_warning(self):
+        import io, subprocess
+        from contextlib import redirect_stderr, redirect_stdout
+
+        app_bundle = self.home / 'Antigravity.app'
+        asar = app_bundle / 'Contents' / 'Resources' / 'app.asar'
+        asar.parent.mkdir(parents=True)
+        asar.write_bytes(b'asar')
+        with patch.multiple(manager, HOME=self.home, APP=asar, PLUGIN=self.plugin, CONFIG=self.config, SETTINGS=self.settings, BACKUPS=self.backups):
+            out = io.StringIO()
+            with patch('sys.platform', 'darwin'), redirect_stdout(out):
+                manager.install(auto_update=False)
+            launcher = self.home / 'Applications' / 'Antigravity (Pulse).app'
+            self.assertTrue(launcher.is_dir())
+            self.assertIn('Launcher (2.33.0+ CDP debug port):', out.getvalue())
+            with patch('sys.platform', 'darwin'):
+                manager.uninstall()
+            self.assertFalse(launcher.exists())
+
+        # Windows shortcut failure / timeout warns cleanly without aborting install
+        win_home = self.home / 'win_fail_home'
+        (win_home / 'Desktop').mkdir(parents=True)
+        win_exe = win_home / 'WinApp' / 'Antigravity.exe'
+        win_asar = win_home / 'WinApp' / 'resources' / 'app.asar'
+        win_asar.parent.mkdir(parents=True)
+        win_exe.write_bytes(b'exe')
+        win_asar.write_bytes(b'asar')
+        win_plugin = win_home / '.gemini' / 'config' / 'plugins' / 'antigravity-pulse'
+        win_config = win_home / '.gemini' / 'config' / 'customizations.json'
+        win_settings = win_home / 'settings.json'
+        win_backups = win_home / 'backups'
+        out2, err2 = io.StringIO(), io.StringIO()
+        with patch.multiple(manager, HOME=win_home, APP=win_asar, PLUGIN=win_plugin, CONFIG=win_config, SETTINGS=win_settings, BACKUPS=win_backups), \
+             patch('sys.platform', 'win32'), \
+             patch.object(manager, '_create_windows_shortcut', side_effect=subprocess.TimeoutExpired('powershell.exe', 30)), \
+             redirect_stdout(out2), redirect_stderr(err2):
+            manager.install(auto_update=False)
+        self.assertTrue((win_plugin / 'plugin.json').is_file())
+        self.assertNotIn('Antigravity.exe', out2.getvalue())
+        self.assertIn('Warning: could not auto-create CDP launcher', err2.getvalue())
+
+        # Windows missing Desktop/Start Menu does not print Antigravity.exe as Launcher
+        bare_home = self.home / 'win_bare_home'
+        bare_home.mkdir()
+        bare_plugin = bare_home / '.gemini' / 'config' / 'plugins' / 'antigravity-pulse'
+        bare_config = bare_home / '.gemini' / 'config' / 'customizations.json'
+        bare_settings = bare_home / 'settings.json'
+        bare_backups = bare_home / 'backups'
+        out3, err3 = io.StringIO(), io.StringIO()
+        with patch.multiple(manager, HOME=bare_home, APP=win_asar, PLUGIN=bare_plugin, CONFIG=bare_config, SETTINGS=bare_settings, BACKUPS=bare_backups), \
+             patch('sys.platform', 'win32'), redirect_stdout(out3), redirect_stderr(err3):
+            manager.install(auto_update=False)
+        self.assertTrue((bare_plugin / 'plugin.json').is_file())
+        self.assertNotIn('Launcher (2.33.0+ CDP debug port):', out3.getvalue())
+        self.assertEqual(err3.getvalue(), '')
 
 if __name__ == '__main__': unittest.main()

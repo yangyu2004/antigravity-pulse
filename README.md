@@ -41,9 +41,11 @@ cd antigravity-pulse
 
 安装完成后，**完全退出并重新打开 Antigravity** 即可生效（后续客户端升级无需重复打补丁）。
 
-> **Antigravity 2.33.0+ 重要说明**：新版 Antigravity 默认关闭了远程调试端口（启动时会清理 `DevToolsActivePort`），直接点击图标启动将只能看到右侧原生插件面板。如需启用**底部输入框状态栏、对话内嵌步骤卡片与界面汉化**，请运行以下任一命令启动客户端（不修改任何应用包或签名；注意开启本地 `--remote-debugging-port=0` 期间本机同用户进程可访问 Chromium 调试通道）：
-> - 一键重启并开启调试端口：`python3 manage.py launch --restart`
-> - 生成桌面快捷启动器（推荐）：`python3 manage.py install-launcher`（macOS 会在 `~/Applications/` 生成 `Antigravity (Pulse).app`）
+> **Antigravity 2.33.0 / 2.34.0+ 重要说明**：新版 Antigravity 默认关闭了远程调试端口（启动时会清理 `DevToolsActivePort`），直接点击原版图标启动将只能看到右侧原生插件面板。安装脚本（`./install.sh` / `.\install.ps1`）现已**自动生成快捷启动器**：
+> - **macOS**：`~/Applications/Antigravity (Pulse).app`（拖入程序坞替换原图标即可一键启动）
+> - **Windows**：桌面与开始菜单 `Antigravity (Pulse).lnk`（固定到任务栏即可）
+> - **Linux**：`~/.local/share/applications/antigravity-pulse.desktop`
+> - 或直接运行一键重启：`python3 manage.py launch --restart`（也可手动重新生成启动器：`python3 manage.py install-launcher`；注意若客户端已在后台/菜单栏运行，需先完整退出 `Cmd+Q` / 托盘退出再用启动器打开，否则单实例锁会忽略新参数；全程不修改任何应用包或签名；开启本地 `--remote-debugging-port=0` 期间本机同用户进程可访问 Chromium 调试通道）
 
 ---
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.10 — 2026-11-22
+
+- **紧急适配 Antigravity `2.34.0+` 移除命令行 `--csrf_token` 导致全指标离线的问题**：
+  - Antigravity `2.34.0` 安全加固后不再通过 `language_server` 启动参数暴露 `--csrf_token`，导致插件本地发现失败并显示「当前版本未提供可用的本地检测凭据」、底部状态栏离线（吞吐率/缓存/上下文/配额/用量与中文自动重命名全部停摆）。
+  - 在 `sidecars/panel/client.mjs` 新增 `endpointFromEnv()`，支持优先读取官方 Sidecar 注入的 `ANTIGRAVITY_LS_ADDRESS` 与 `ANTIGRAVITY_CSRF_TOKEN`（严格限制回环 HTTP 且仅在唯一运行中的 `--standalone` 进程确实监听该端口时采信，保留 `<= 2.33.0` 命令行凭据优先并杜绝跨代混用）。
+- **适配 `2.34.0` 渲染层控件与新增界面汉化**：
+  - 在 `compat/inline-widget.cjs` 的输入区探测补齐 `[data-testid="input-send-button"]`、`[data-testid="input-stop-button"]` 与 `[data-testid="input-cancel-button"]`。
+  - 在 `compat/host-i18n.cjs` 补充 `2.34.0` 新增界面词条（`N files changed`、`Review`、`Response actions`、`Breadcrumb`）并统一「审核」译名与修复漏翻。
+- **跨平台安装即自动生成一键调试启动器（macOS / Windows / Linux）**：
+  - `manage.py install` 现自动调用 `install_launcher()` 创建带 `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 的桌面快捷启动器（新增 Windows 桌面 / OneDrive 桌面 / 开始菜单 `.lnk` 快捷方式生成，参数全部经环境变量传入 PowerShell COM 并设 30s 超时保护），卸载时同步清理。
+  - 更新 `COMPATIBILITY.md` 与 `README.md` 记录 Antigravity `2.34.0`（Electron `44.9.1` / Chromium `152.0.7977.167`）实机验证结果。
+
 ## 0.9.9 — 2026-11-18
 
 - **修复开启新轮对话或切换空会话时上一条回答仍残留未完成卡片的 Bug**：

@@ -4,9 +4,9 @@
 | --- | --- | --- |
 | Windows | Python / PowerShell，CIM 筛选 standalone + 单次 netstat PID 所属监听端口 | Windows 11 / 桌面 App 2.21.1、2.22.0、2.28.0、2.28.2；真实对话上下文、合并悬浮卡已实机验证并验收；CI 生命周期与数据测试 |
 | Linux | Python3 / POSIX shell，当前用户 `/proc` + TCP/TCP6 socket inode | Ubuntu CI 原生端口测试、安装生命周期、官方 2.21.1/2.28.2 资源与 SDK 检查；完整登录 App GUI 待用户实机验证 |
-| macOS | Python3 / POSIX shell，当前用户 `ps` + `lsof` PID 所属端口 | macOS (arm64) / 桌面 App **2.32.1**（Electron 26.5.0 / Chromium 152.0.7977.167）实机已验证并验收：CDP loopback 注入（`#ag-pulse-status-bar`、`.ag-pulse-inline-chat-host` 步骤卡片）、真实 TPS/缓存率/上下文窗口与历史会话恢复正常；CI 原生端口测试、安装生命周期测试通过 |
+| macOS | Python3 / POSIX shell，当前用户 `ps` + `lsof` PID 所属端口（`2.34.0+` 优先校验官方 Sidecar 环境变量 `ANTIGRAVITY_LS_ADDRESS` / `ANTIGRAVITY_CSRF_TOKEN` 归属） | macOS (arm64) / 桌面 App **2.34.0**（Electron 44.9.1 / Chromium 152.0.7977.167）、2.33.0、2.32.1 实机已验证并验收：CDP loopback 注入（`#ag-pulse-status-bar`、`.ag-pulse-inline-chat-host` 步骤卡片）、真实 TPS/缓存率/上下文窗口、5h·周配额与历史会话恢复正常；CI 原生端口测试、安装生命周期测试通过 |
 
-上表面向 **Antigravity 桌面 App 2.32.1** 及历史版本。CLI 使用独立 statusLine 适配；v0.7.0 新增自带 IDE 的独立 VSIX。VS Code、Visual Studio、JetBrains、Zed、Xcode 中的 Antigravity 扩展以及 iOS 尚未兼容。表中保留早期桌面 App 2.21.1 的资源验证记录；v0.8.13 的资源检查目标更新为 2.28.2；v0.9.3 已在 macOS 2.32.1 实机全面验收。
+上表面向 **Antigravity 桌面 App 2.34.0** 及历史版本。CLI 使用独立 statusLine 适配；v0.7.0 新增自带 IDE 的独立 VSIX。VS Code、Visual Studio、JetBrains、Zed、Xcode 中的 Antigravity 扩展以及 iOS 尚未兼容。表中保留早期桌面 App 2.21.1 的资源验证记录；v0.8.13 的资源检查目标更新为 2.28.2；v0.9.3 已在 macOS 2.32.1 实机验收；v0.9.10 已在 macOS 2.34.0 实机验收。
 Python 3.10+ 仅用于生命周期，无 pip 依赖；后台使用宿主 Node，内嵌桥接需原生 WebSocket，建议 Node 24。Linux/macOS 架构跟随宿主，不分发平台二进制。官方系统要求见 [Antigravity 下载页](https://antigravity.google/download)。
 
 2026-10-28 补充：Windows 11 / 桌面 App **2.28.0** 已实机验证修复后的单份控件、历史会话速率／Token／上下文恢复、详情卡、用量窗口、额度和会话往返切换。延迟回调与重复挂载的浏览器回归纳入三系统 CI；这不等同于 Linux/macOS 2.28.0 或新版独立 IDE 的登录后实机验收。安装后需要完整退出并重开宿主一次。

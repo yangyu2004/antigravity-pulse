@@ -70,7 +70,7 @@ test('discovery falls back from missing/stale logs and clears old server on fail
   const rows=[{ProcessId:12,CommandLine:'language_server --standalone --csrf_token=test',Ports:[1234]}];
   for(const primary of ['missing','stale','valid']){
     const reads=[];
-    const client=new AntigravityClient({paths:()=>({logCandidates:['native','profile']}),processes:async()=>rows,
+    const client=new AntigravityClient({env:{},paths:()=>({logCandidates:['native','profile']}),processes:async()=>rows,
       readLog:async path=>{
         reads.push(path);
         if(path==='native'&&primary==='missing')throw Object.assign(new Error('missing'),{code:'ENOENT'});
@@ -84,7 +84,7 @@ test('discovery falls back from missing/stale logs and clears old server on fail
 });
 
 test('fallback never selects a log port owned by another process or conceals read permission errors',async()=>{
-  const client=new AntigravityClient({paths:()=>({logCandidates:['native','profile']}),
+  const client=new AntigravityClient({env:{},paths:()=>({logCandidates:['native','profile']}),
     processes:async()=>[{ProcessId:12,CommandLine:'language_server --standalone --csrf_token=test',Ports:[1234]}],
     readLog:async()=> 'listening on random port at 9999 for HTTP\n'});
   await assert.rejects(client.discover(),/接口启动/);assert.equal(client.server,null);

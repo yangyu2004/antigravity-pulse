@@ -132,7 +132,14 @@ test('host-i18n translates host UI chrome, preserves protected regions, supports
     const pulseText = new FakeText('Working');
     pulseBar.append(pulseText);
 
-    document.body.append(sidebarBtn, worked, taskFooter, composerPh, modelBtn, codeBlock, response, pulseBar);
+    const changedHeader = new FakeElement('div', { 'aria-label': 'Response actions' });
+    const changedText = new FakeText('13 files changed');
+    changedHeader.append(changedText);
+    const reviewBtn = new FakeElement('button', { 'aria-label': 'Breadcrumb' });
+    const reviewText = new FakeText('Review');
+    reviewBtn.append(reviewText);
+
+    document.body.append(sidebarBtn, worked, taskFooter, composerPh, modelBtn, codeBlock, response, pulseBar, changedHeader, reviewBtn);
 
     const tr = createHostTranslator({ enabled: true, language: 'zh-CN' });
     assert.equal(sidebarBtn.getAttribute('aria-label'), '切换侧边栏');
@@ -142,6 +149,10 @@ test('host-i18n translates host UI chrome, preserves protected regions, supports
     assert.equal(phText.nodeValue, '想问什么都可以，@ 引用，/ 执行动作');
     assert.equal(modelBtn.getAttribute('aria-label'), '选择模型，当前：Gemini 4 Hydrogen High');
     assert.equal(modelText.nodeValue, 'Gemini 4 Hydrogen');
+    assert.equal(changedHeader.getAttribute('aria-label'), '回复操作');
+    assert.equal(changedText.nodeValue, '13 个文件已更改');
+    assert.equal(reviewBtn.getAttribute('aria-label'), '面包屑导航');
+    assert.equal(reviewText.nodeValue, '审核');
     assert.equal(codeText.nodeValue, 'New Conversation', 'Code block must never be translated');
     assert.equal(proseText.nodeValue, 'Settings', 'Assistant markdown prose must never be translated');
     assert.equal(pulseText.nodeValue, 'Working', 'Plugin own widget must be skipped');
@@ -150,12 +161,16 @@ test('host-i18n translates host UI chrome, preserves protected regions, supports
     assert.equal(sidebarBtn.getAttribute('aria-label'), '切換側邊欄');
     assert.equal(pinnedText.nodeValue, '置頂對話');
     assert.equal(workedText.nodeValue, '已執行 58 秒');
+    assert.equal(changedText.nodeValue, '13 個文件已更改');
+    assert.equal(reviewText.nodeValue, '審核');
 
     tr.setConfig({ enabled: false, language: 'en' });
     assert.equal(sidebarBtn.getAttribute('aria-label'), 'Toggle Sidebar');
     assert.equal(pinnedText.nodeValue, 'Pinned Conversations');
     assert.equal(workedText.nodeValue, 'Worked for 58s');
     assert.equal(taskText.nodeValue, '1 task running');
+    assert.equal(changedText.nodeValue, '13 files changed');
+    assert.equal(reviewText.nodeValue, 'Review');
 
     tr.setConfig({ enabled: true, language: 'zh-CN' });
     assert.equal(pinnedText.nodeValue, '置顶对话');

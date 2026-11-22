@@ -233,7 +233,16 @@ def install(panel_only=False, legacy_loader=False, auto_update=None):
         install_auto_update_schedule()
     else:
         remove_auto_update_schedule()
+    launcher_path = None
+    if not panel_only and not legacy_loader and APP.is_file():
+        try:
+            launcher_path = install_launcher(quiet=True)
+        except Exception as err:
+            launcher_path = None
+            print(f'Warning: could not auto-create CDP launcher ({err}). Run: python3 manage.py install-launcher', file=sys.stderr)
     print('Installed:', PLUGIN)
+    if launcher_path is not None:
+        print('Launcher (2.33.0+ CDP debug port):', launcher_path)
     print('Fully quit and reopen Antigravity to start the plugin runtime. App updates no longer overwrite the inline adapter.')
 
 @lifecycle_operation
@@ -256,6 +265,7 @@ def uninstall():
             if module.MARKER.encode() in preload:
                 raise RuntimeError('Application changed since patching. Inspect the backup before uninstalling.')
     remove_auto_update_schedule()
+    remove_launcher()
     if PLUGIN.exists():
         set_enabled(False)
         resolved = PLUGIN.resolve()
@@ -382,8 +392,55 @@ def launch(restart=False, wait_timeout=8.0):
         print(f'Launched {entry} with {" ".join(debug_flags)}.')
 
 
-def install_launcher():
+def _windows_shortcut_dirs():
+    try:
+        real_home = HOME.resolve() == Path.home().resolve()
+    except OSError:
+        real_home = False
+    roaming = Path(os.environ['APPDATA']) if real_home and os.environ.get('APPDATA') else (HOME / 'AppData' / 'Roaming')
+    candidates = [HOME / 'Desktop', HOME / 'OneDrive' / 'Desktop']
+    if real_home:
+        for env_key in ('OneDrive', 'OneDriveCommercial', 'OneDriveConsumer'):
+            val = os.environ.get(env_key)
+            if val:
+                candidates.append(Path(val) / 'Desktop')
+    candidates.append(roaming / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs')
+    out, seen = [], set()
+    for p in candidates:
+        key = str(p).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _create_windows_shortcut(lnk_path, target, arguments):
+    script = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        "$sc = $ws.CreateShortcut($env:AGP_LNK_PATH); "
+        "$sc.TargetPath = $env:AGP_LNK_TARGET; "
+        "$sc.Arguments = $env:AGP_LNK_ARGS; "
+        "$sc.WorkingDirectory = $env:AGP_LNK_CWD; "
+        "$sc.IconLocation = ($env:AGP_LNK_TARGET + ',0'); "
+        "$sc.Save()"
+    )
+    env = {
+        **os.environ,
+        'AGP_LNK_PATH': str(lnk_path),
+        'AGP_LNK_TARGET': str(target),
+        'AGP_LNK_ARGS': str(arguments),
+        'AGP_LNK_CWD': str(Path(target).parent),
+    }
+    subprocess.run(
+        ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30, env=env,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+    )
+
+
+def install_launcher(quiet=False):
     entry = resolve_desktop_entry()
+    debug_arg_str = '--remote-debugging-port=0 --remote-debugging-address=127.0.0.1'
     if sys.platform == 'darwin':
         app_dir = HOME / 'Applications' / 'Antigravity (Pulse).app'
         macos_dir = app_dir / 'Contents' / 'MacOS'
@@ -420,11 +477,12 @@ def install_launcher():
         quoted_entry = shlex.quote(str(entry))
         script.write_text(
             '#!/bin/sh\n'
-            f'exec open -a {quoted_entry} --args --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 "$@"\n',
+            f'exec open -a {quoted_entry} --args {debug_arg_str} "$@"\n',
             encoding='utf-8',
         )
         os.chmod(script, 0o755)
-        print('Created macOS launcher:', app_dir)
+        if not quiet:
+            print('Created macOS launcher:', app_dir)
         return app_dir
     if sys.platform.startswith('linux'):
         desktop_dir = HOME / '.local' / 'share' / 'applications'
@@ -434,16 +492,59 @@ def install_launcher():
             '[Desktop Entry]\n'
             'Type=Application\n'
             'Name=Antigravity (Pulse)\n'
-            f'Exec="{entry}" --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 %F\n'
+            f'Exec="{entry}" {debug_arg_str} %F\n'
             'Terminal=false\n'
             'Categories=Development;IDE;\n',
             encoding='utf-8',
         )
         os.chmod(desktop_file, 0o755)
-        print('Created Linux desktop entry:', desktop_file)
+        if not quiet:
+            print('Created Linux desktop entry:', desktop_file)
         return desktop_file
-    print(f'Launch {entry} with: --remote-debugging-port=0 --remote-debugging-address=127.0.0.1')
-    return entry
+    if sys.platform == 'win32':
+        created, last_err = [], None
+        for parent in _windows_shortcut_dirs():
+            if parent.is_dir():
+                lnk = parent / 'Antigravity (Pulse).lnk'
+                try:
+                    _create_windows_shortcut(lnk, entry, debug_arg_str)
+                    created.append(lnk)
+                except (OSError, subprocess.SubprocessError) as err:
+                    last_err = err
+        if created:
+            if not quiet:
+                print('Created Windows launcher:', created[0])
+            return created[0]
+        if last_err is not None:
+            raise RuntimeError(f'Failed to create Windows shortcut: {last_err}')
+        if not quiet:
+            print(f'Launch {entry} with: {debug_arg_str}')
+        return None
+    if not quiet:
+        print(f'Launch {entry} with: {debug_arg_str}')
+    return None
+
+
+def remove_launcher():
+    if sys.platform == 'darwin':
+        app_dir = HOME / 'Applications' / 'Antigravity (Pulse).app'
+        if app_dir.exists() and not app_dir.is_symlink():
+            shutil.rmtree(app_dir, ignore_errors=True)
+    elif sys.platform.startswith('linux'):
+        desktop_file = HOME / '.local' / 'share' / 'applications' / 'antigravity-pulse.desktop'
+        try:
+            if desktop_file.is_file():
+                desktop_file.unlink()
+        except OSError:
+            pass
+    elif sys.platform == 'win32':
+        for parent in _windows_shortcut_dirs():
+            lnk = parent / 'Antigravity (Pulse).lnk'
+            try:
+                if lnk.is_file():
+                    lnk.unlink()
+            except OSError:
+                pass
 
 def package(output=None):
     version = json_read(SOURCE / 'plugin.json')['version']
