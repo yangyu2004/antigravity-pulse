@@ -1,18 +1,21 @@
-import { readFile, writeFile, mkdir, open, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, open, stat, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HAN_RE = /\p{Script=Han}/u;
 const HEAD_READ_BYTES = 49152;
 const MAX_TITLE_CHARS = 18;
+const MAX_RENAMED_ENTRIES = 512;
 // 宿主有时把首条提问原样塞进标题，超过这个长度且与提问开头一致时视为原文堆砌
 const RAW_TITLE_MIN_CHARS = 24;
 
 export class TitleRenamer {
-  constructor({ client, dataDir, brainRoot = join(homedir(), '.gemini', 'antigravity', 'brain') }) {
+  constructor({ client, dataDir, brainRoot = join(homedir(), '.gemini', 'antigravity', 'brain'), owns = () => true }) {
     this.client = client;
     this.brainRoot = brainRoot;
+    this.owns = owns;
     this.stateFile = join(dataDir, 'auto_renamed_titles.json');
     this.state = null;
     this.inFlight = false;
@@ -34,16 +37,32 @@ export class TitleRenamer {
     return this.state;
   }
 
+  pruneState() {
+    if (!this.state?.renamed) return;
+    const entries = Object.entries(this.state.renamed);
+    if (entries.length <= MAX_RENAMED_ENTRIES) return;
+    entries.sort((a, b) => (a[1]?.updatedAt || 0) - (b[1]?.updatedAt || 0));
+    const drop = entries.length - MAX_RENAMED_ENTRIES;
+    for (let i = 0; i < drop; i++) delete this.state.renamed[entries[i][0]];
+  }
+
   async saveState() {
-    if (!this.state) return;
+    if (!this.state || !this.owns()) return;
+    this.pruneState();
+    let tmp;
     try {
       await mkdir(join(this.stateFile, '..'), { recursive: true });
-      await writeFile(this.stateFile, JSON.stringify(this.state, null, 2), 'utf8');
-    } catch {}
+      tmp = `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(this.state, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await rename(tmp, this.stateFile);
+      tmp = null;
+    } catch {} finally {
+      if (tmp) await unlink(tmp).catch(() => {});
+    }
   }
 
   maybeSync(conversationId) {
-    if (!this.client || this.inFlight) return;
+    if (!this.client || this.inFlight || !this.owns()) return;
     const now = Date.now();
     const id = GUID.test(conversationId || '') ? conversationId.toLowerCase() : null;
     const needActiveCheck = id && !this.state?.renamed?.[id]?.locked && (now - this.lastProbeAt >= 5000);
@@ -97,6 +116,12 @@ export class TitleRenamer {
         continue;
       }
       if (!currentTitle || currentTitle === '未命名会话' || /^new conversation$/i.test(currentTitle)) continue;
+
+      if (record?.provisional && currentTitle !== record.title && HAN_RE.test(currentTitle)) {
+        state.renamed[id] = { title: currentTitle, locked: true, updatedAt: now };
+        dirty = true;
+        continue;
+      }
 
       if (HAN_RE.test(currentTitle) && !record?.provisional) {
         if (await this.isRawPromptTitle(id, currentTitle)) {

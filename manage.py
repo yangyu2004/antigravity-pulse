@@ -5,12 +5,14 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import uuid
 import zipfile
 from functools import wraps
 
@@ -46,16 +48,47 @@ def lifecycle_operation(function):
             return function(*args, **kwargs)
     return locked
 
-def json_read(file, default=None):
+def json_read(file, default=None, ignore_errors=False):
     if not file.exists():
         return {} if default is None else default
-    return json.loads(file.read_text(encoding='utf-8-sig'))
+    try:
+        return json.loads(file.read_text(encoding='utf-8-sig'))
+    except (OSError, json.JSONDecodeError):
+        if ignore_errors:
+            return {} if default is None else default
+        raise
 
 def atomic_json(file, value):
     file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = file.with_name(file.name + '.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    os.replace(temporary, file)
+    temporary = file.with_name(f'{file.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp')
+    try:
+        with temporary.open('w', encoding='utf-8') as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, file)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+def _write_bytes_atomic(file, data):
+    temporary = file.with_name(f'{file.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp')
+    try:
+        with temporary.open('wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, file)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 def own_plugin():
     if PLUGIN.is_symlink() or (PLUGIN.exists() and PLUGIN.resolve().parent != (HOME / '.gemini' / 'config' / 'plugins').resolve()):
@@ -84,7 +117,7 @@ def original_for_current(current):
             return original
     return None
 
-def set_enabled(enabled):
+def _set_enabled_unlocked(enabled):
     own_plugin()
     if not (PLUGIN / 'plugin.json').exists():
         raise RuntimeError('Install Antigrative Dashboard before changing its state.')
@@ -97,13 +130,17 @@ def set_enabled(enabled):
     atomic_json(SETTINGS, settings)
     print('Antigrative Dashboard enabled.' if enabled else 'Antigrative Dashboard disabled; the toolbar hides on its next poll.')
 
+@lifecycle_operation
+def set_enabled(enabled):
+    _set_enabled_unlocked(enabled)
+
 def remove_verified_legacy_adapter():
     if not APP.is_file():
         return
     current = APP.read_bytes()
     original = original_for_current(current)
     if original is not None:
-        APP.write_bytes(original)
+        _write_bytes_atomic(APP, original)
         if APP.read_bytes() != original:
             raise RuntimeError('Legacy adapter restoration verification failed.')
         print('Restored the exact verified legacy archive; future updates need no archive patches.')
@@ -125,30 +162,15 @@ def install_auto_update_schedule():
         plist_dir = HOME / 'Library' / 'LaunchAgents'
         plist_path = plist_dir / 'com.antigravity.pulse.autoupdate.plist'
         plist_dir.mkdir(parents=True, exist_ok=True)
-        plist_xml = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            '<plist version="1.0">\n'
-            '<dict>\n'
-            '  <key>Label</key>\n'
-            '  <string>com.antigravity.pulse.autoupdate</string>\n'
-            '  <key>ProgramArguments</key>\n'
-            '  <array>\n'
-            f'    <string>{sys.executable}</string>\n'
-            f'    <string>{updater_script}</string>\n'
-            '  </array>\n'
-            '  <key>RunAtLoad</key>\n'
-            '  <true/>\n'
-            '  <key>StartInterval</key>\n'
-            '  <integer>3600</integer>\n'
-            '  <key>StandardOutPath</key>\n'
-            '  <string>/dev/null</string>\n'
-            '  <key>StandardErrorPath</key>\n'
-            '  <string>/dev/null</string>\n'
-            '</dict>\n'
-            '</plist>\n'
-        )
-        plist_path.write_text(plist_xml, encoding='utf-8')
+        plist_bytes = plistlib.dumps({
+            'Label': 'com.antigravity.pulse.autoupdate',
+            'ProgramArguments': [str(sys.executable), str(updater_script)],
+            'RunAtLoad': True,
+            'StartInterval': 3600,
+            'StandardOutPath': '/dev/null',
+            'StandardErrorPath': '/dev/null',
+        })
+        _write_bytes_atomic(plist_path, plist_bytes)
         uid = os.getuid()
         subprocess.run(['launchctl', 'bootout', f'gui/{uid}', str(plist_path)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -228,7 +250,7 @@ def install(panel_only=False, legacy_loader=False, auto_update=None):
     if os.environ.get('AG_PULSE_PROFILE'):
         settings['profile'] = str(_paths['profile'])
     atomic_json(SETTINGS, settings)
-    set_enabled(True)
+    _set_enabled_unlocked(True)
     if settings.get('autoUpdate', True):
         install_auto_update_schedule()
     else:
@@ -254,7 +276,7 @@ def uninstall():
         current = APP.read_bytes()
         original = original_for_current(current)
         if original is not None:
-            APP.write_bytes(original)
+            _write_bytes_atomic(APP, original)
             if APP.read_bytes() != original:
                 raise RuntimeError('Restored application verification failed.')
             print('Original Antigravity archive restored.')
@@ -267,7 +289,7 @@ def uninstall():
     remove_auto_update_schedule()
     remove_launcher()
     if PLUGIN.exists():
-        set_enabled(False)
+        _set_enabled_unlocked(False)
         resolved = PLUGIN.resolve()
         expected_parent = (HOME / '.gemini' / 'config' / 'plugins').resolve()
         if PLUGIN.is_symlink() or resolved.parent != expected_parent or resolved.name != 'antigravity-pulse':
@@ -304,7 +326,7 @@ def status():
                       'pluginDirectory': str(PLUGIN),
                       'integrationMode': settings.get('mode', 'legacy'),
                       'debugPortActive': _active_debug_port(PROFILE / 'DevToolsActivePort') is not None,
-                      'inlineIntegration': json_read(health_file, None),
+                      'inlineIntegration': json_read(health_file, None, ignore_errors=True),
                       'toolbarAdapterRecoverable': APP.exists() and original_for_current(APP.read_bytes()) is not None}, indent=2))
 
 
@@ -333,13 +355,13 @@ def resolve_desktop_entry():
 
 def _is_desktop_running():
     if sys.platform == 'darwin':
-        return subprocess.run(['pgrep', '-x', 'Antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        return subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', 'Antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
     if sys.platform == 'win32':
         res = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq Antigravity.exe', '/NH'],
                              capture_output=True, text=True, check=False,
                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
         return 'Antigravity.exe' in (res.stdout or '')
-    return subprocess.run(['pgrep', '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+    return subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
 
 
 def launch(restart=False, wait_timeout=8.0):
@@ -359,7 +381,7 @@ def launch(restart=False, wait_timeout=8.0):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
         else:
-            subprocess.run(['pkill', '-TERM', '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(['pkill', '-TERM', '-u', str(os.getuid()), '-x', 'antigravity'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and _is_desktop_running():
             time.sleep(0.25)
@@ -443,33 +465,24 @@ def install_launcher(quiet=False):
     debug_arg_str = '--remote-debugging-port=0 --remote-debugging-address=127.0.0.1'
     if sys.platform == 'darwin':
         app_dir = HOME / 'Applications' / 'Antigravity (Pulse).app'
-        macos_dir = app_dir / 'Contents' / 'MacOS'
-        res_dir = app_dir / 'Contents' / 'Resources'
+        contents_dir = app_dir / 'Contents'
+        macos_dir = contents_dir / 'MacOS'
+        res_dir = contents_dir / 'Resources'
+        for p in (app_dir, contents_dir, macos_dir, res_dir, contents_dir / 'Info.plist', macos_dir / 'launch'):
+            if p.is_symlink():
+                raise RuntimeError(f'Refusing to write through symlink: {p}')
         macos_dir.mkdir(parents=True, exist_ok=True)
         res_dir.mkdir(parents=True, exist_ok=True)
-        plist = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            '<plist version="1.0">\n'
-            '<dict>\n'
-            '  <key>CFBundleName</key>\n'
-            '  <string>Antigravity (Pulse)</string>\n'
-            '  <key>CFBundleDisplayName</key>\n'
-            '  <string>Antigravity (Pulse)</string>\n'
-            '  <key>CFBundleIdentifier</key>\n'
-            '  <string>com.antigravity.pulse.launcher</string>\n'
-            '  <key>CFBundleVersion</key>\n'
-            '  <string>1.0</string>\n'
-            '  <key>CFBundleExecutable</key>\n'
-            '  <string>launch</string>\n'
-            '  <key>CFBundleIconFile</key>\n'
-            '  <string>icon.icns</string>\n'
-            '  <key>LSUIElement</key>\n'
-            '  <true/>\n'
-            '</dict>\n'
-            '</plist>\n'
-        )
-        (app_dir / 'Contents' / 'Info.plist').write_text(plist, encoding='utf-8')
+        plist_bytes = plistlib.dumps({
+            'CFBundleName': 'Antigravity (Pulse)',
+            'CFBundleDisplayName': 'Antigravity (Pulse)',
+            'CFBundleIdentifier': 'com.antigravity.pulse.launcher',
+            'CFBundleVersion': '1.0',
+            'CFBundleExecutable': 'launch',
+            'CFBundleIconFile': 'icon.icns',
+            'LSUIElement': True,
+        })
+        _write_bytes_atomic(contents_dir / 'Info.plist', plist_bytes)
         icon_src = Path(entry) / 'Contents' / 'Resources' / 'icon.icns'
         if icon_src.is_file():
             shutil.copy2(icon_src, res_dir / 'icon.icns')
@@ -488,11 +501,19 @@ def install_launcher(quiet=False):
         desktop_dir = HOME / '.local' / 'share' / 'applications'
         desktop_dir.mkdir(parents=True, exist_ok=True)
         desktop_file = desktop_dir / 'antigravity-pulse.desktop'
+        if desktop_file.is_symlink():
+            raise RuntimeError(f'Refusing to write through symlink: {desktop_file}')
+        escaped_entry = (str(entry)
+                         .replace('\\', '\\\\')
+                         .replace('"', '\\"')
+                         .replace('`', '\\`')
+                         .replace('$', '\\$')
+                         .replace('%', '%%'))
         desktop_file.write_text(
             '[Desktop Entry]\n'
             'Type=Application\n'
             'Name=Antigravity (Pulse)\n'
-            f'Exec="{entry}" {debug_arg_str} %F\n'
+            f'Exec="{escaped_entry}" {debug_arg_str} %F\n'
             'Terminal=false\n'
             'Categories=Development;IDE;\n',
             encoding='utf-8',

@@ -1,9 +1,10 @@
 // Supports both background automatic updates and manual updates via the bounded
 // Python worker, which uses the user's existing proxy configuration.
-import {readFile,mkdir,writeFile,unlink} from 'node:fs/promises';
+import {readFile,mkdir,writeFile,unlink,rename} from 'node:fs/promises';
 import {join,dirname,resolve,win32} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
+import {cleanChildEnv} from '../../compat/platform.mjs';
 
 const progressPhases=new Set(['check','download','verify','extract','backup','install','recover','complete']);
 const errorCodes=new Set(['python','network','busy','verification','install','rollback','location']);
@@ -48,7 +49,7 @@ function safeProgress(value){
 export async function runUpdateWorker(worker,args,{spawnImpl=spawn,platform=process.platform,onProgress=null,cwd}={}){
  worker=resolve(worker);
  const candidates=platform==='win32'?[['python',[]],['py',['-3']],['python3',[]]]:[['python3',[]],['python',[]]];
- const options={stdio:['ignore','pipe','pipe'],windowsHide:true,cwd:resolve(cwd??resolve(dirname(worker),'..'))};
+ const options={stdio:['ignore','pipe','pipe'],windowsHide:true,cwd:resolve(cwd??resolve(dirname(worker),'..')),env:cleanChildEnv()};
  let unsupported=false,selected;
  for(const [command,prefix] of candidates){
   const status=await probePython(command,prefix,options,spawnImpl);
@@ -153,17 +154,43 @@ export class AppUpdater{
   if(input.action==='reload'&&input.version===undefined&&this.state.state==='installed'&&this.onReload){this.state={...this.state,state:'reloading'};setTimeout(()=>this.onReload(),500);return this.publicState();}
   throw Error('verification');
  }
- async autoCheckAndApply({isEnabled=()=>true,isBusy=async()=>false,reloadDelayMs=1500,idlePollMs=5000,maxIdleWaitChecks=60}={}){
+ async readAutoStamp(){
+  try{return JSON.parse(await readFile(join(this.dataDir,'auto-check-stamp.json'),'utf8'));}catch{return null;}
+ }
+ async writeAutoStamp(payload){
+  let tmp;
+  try{
+   await mkdir(this.dataDir,{recursive:true});
+   const dest=join(this.dataDir,'auto-check-stamp.json');
+   tmp=join(this.dataDir,`auto-check-stamp.${process.pid}.${randomUUID()}.tmp`);
+   await writeFile(tmp,JSON.stringify(payload,null,2)+'\n',{flag:'wx',mode:0o600});
+   await rename(tmp,dest);
+   tmp=null;
+  }catch{}finally{if(tmp)await unlink(tmp).catch(()=>{});}
+ }
+ async autoCheckAndApply({isEnabled=()=>true,isBusy=async()=>false,reloadDelayMs=1500,idlePollMs=5000,maxIdleWaitChecks=60,minIntervalMs=0}={}){
   if(this.autoStopped||!isEnabled())return this.publicState();
   if(this.autoCyclePending)return this.autoCyclePending;
   if(this.job||this.applyPending||['installing','installed','reloading'].includes(this.state.state))return this.publicState();
   this.autoCyclePending=(async()=>{
    try{
+    if(minIntervalMs>0){
+     const stamp=await this.readAutoStamp();
+     const lastCheckedMs=typeof stamp?.lastCheckedAt==='number'?stamp.lastCheckedAt*1000:0;
+     if(lastCheckedMs>0&&this.now()-lastCheckedMs>=0&&this.now()-lastCheckedMs<minIntervalMs)return this.publicState();
+     await this.writeAutoStamp({lastCheckedAt:this.now()/1000,status:'checking',source:'sidecar'});
+    }
     const checked=await this.check();
+    if(minIntervalMs>0){
+     await this.writeAutoStamp({lastCheckedAt:this.now()/1000,status:checked.state==='available'?'available':checked.state==='current'?'current':'check-error',currentVersion:checked.currentVersion,latestVersion:checked.latestVersion,source:'sidecar'});
+    }
     if(this.autoStopped||!isEnabled()||checked.state!=='available'||!checked.latestVersion)return this.publicState();
     await this.apply(checked.latestVersion);
     if(this.job)await this.job;
     if(this.autoStopped||this.state.state!=='installed'||!this.onReload)return this.publicState();
+    if(minIntervalMs>0){
+     await this.writeAutoStamp({lastCheckedAt:this.now()/1000,status:'updated',version:checked.latestVersion,source:'sidecar'});
+    }
     this.scheduleIdleReload({isEnabled,isBusy,delayMs:reloadDelayMs,idlePollMs,maxChecks:maxIdleWaitChecks});
    }catch{}
    return this.publicState();
@@ -177,9 +204,10 @@ export class AppUpdater{
    if(this.autoStopped||this.state.state!=='installed'||!this.onReload||!isEnabled())return;
    let busy=false;
    try{busy=Boolean(await isBusy());}catch{}
-   if(busy&&checks<maxChecks){
+   if(busy){
     checks++;
-    this.reloadWaitTimer=setTimeout(()=>void poll(),idlePollMs);
+    const nextDelay=checks<maxChecks?idlePollMs:Math.max(idlePollMs,30000);
+    this.reloadWaitTimer=setTimeout(()=>void poll(),nextDelay);
     this.reloadWaitTimer.unref?.();
     return;
    }
@@ -195,7 +223,8 @@ export class AppUpdater{
  startAutoUpdate({initialDelayMs=8000,intervalMs=30*60*1000,reloadDelayMs=1500,idlePollMs=5000,maxIdleWaitChecks=60,isEnabled=()=>true,isBusy=async()=>false}={}){
   this.stopAutoUpdate();
   this.autoStopped=false;
-  const run=()=>void this.autoCheckAndApply({isEnabled,isBusy,reloadDelayMs,idlePollMs,maxIdleWaitChecks});
+  const minIntervalMs=Math.max(0,Math.floor(intervalMs*0.8));
+  const run=()=>void this.autoCheckAndApply({isEnabled,isBusy,reloadDelayMs,idlePollMs,maxIdleWaitChecks,minIntervalMs});
   this.autoBootTimer=setTimeout(run,initialDelayMs);
   this.autoBootTimer.unref?.();
   this.autoIntervalTimer=setInterval(run,intervalMs);

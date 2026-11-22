@@ -137,6 +137,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
         '等待 Antigrative Dashboard 重新连接':'等待 Antigrative Dashboard 重新連線',
         '等待 AG Pulse 后台启动':'等待 AG Pulse 背景程式啟動',
         '等待 AG Pulse 重新连接':'等待 AG Pulse 重新連線',
+        'Antigravity 后台已重启，等待新 Sidecar 接管':'Antigravity 背景程式已重新啟動，等待新 Sidecar 接管',
       };
       if(twErrors[value])return twErrors[value];
       const match=String(value).match(/^Antigravity 接口 (\w+) 返回 (\d+)$/);
@@ -167,6 +168,7 @@ module.exports = function createDashboardI18n(initialLanguage) {
       '等待 Antigrative Dashboard 重新连接':'Waiting for the dashboard to reconnect.',
       '等待 AG Pulse 后台启动':'Waiting for the dashboard background process.',
       '等待 AG Pulse 重新连接':'Waiting for the dashboard to reconnect.',
+      'Antigravity 后台已重启，等待新 Sidecar 接管':'Antigravity backend restarted; waiting for the new sidecar to take over.',
     };
     if(errors[value])return errors[value];
     const match=String(value).match(/^Antigravity 接口 (\w+) 返回 (\d+)$/);

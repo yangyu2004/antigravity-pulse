@@ -290,14 +290,14 @@ try {
     assert.equal(await host.locator('#context-card').isVisible(),true,`${mode}: composer focus stole the quota card`);
     assert.equal(await host.locator('.group-menu').isVisible(),true,`${mode}: quota menu disappeared after clicking`);
     assert.equal(await page.evaluate(()=>window.testComposerClicks),0,'Widget clicks must not activate composer focus handlers');
-    await host.locator('[data-group="3p"]').click();await page.waitForTimeout(180);
+    await host.locator('[data-group-id="3p"]').click();await page.waitForTimeout(180);
     assert.equal(await host.locator('#context-card').isVisible(),true);
     assert.equal(await host.locator('.group-menu').isVisible(),false);
     assert.match(await host.locator('.group-trigger').textContent(),/Claude \/ GPT/);
     assert.match(await host.locator('#five-balance').textContent(),/41\.7%/);
     await host.locator('.group-trigger').focus();await page.keyboard.press('Enter');
     assert.equal(await host.locator('.group-menu').isVisible(),true);
-    await host.locator('[data-group="gemini"]').focus();await page.keyboard.press('Enter');
+    await host.locator('[data-group-id="gemini"]').focus();await page.keyboard.press('Enter');
     await page.waitForTimeout(180);
     assert.equal(await host.locator('#context-card').isVisible(),true);
     assert.equal(await host.locator('.group-trigger').evaluate(e=>e.getRootNode().activeElement===e),true);

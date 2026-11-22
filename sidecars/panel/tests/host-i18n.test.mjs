@@ -183,3 +183,68 @@ test('host-i18n translates host UI chrome, preserves protected regions, supports
     globalThis.requestAnimationFrame = prevRaf;
   }
 });
+
+test('host-i18n fixes zh-TW multi-char phrases, restricts broad patterns to controls, and prunes detached DOM nodes', () => {
+  const { FakeElement, FakeText, document, FakeMutationObserver } = makeMiniDom();
+  const prevDoc = globalThis.document;
+  const prevNodeFilter = globalThis.NodeFilter;
+  const prevObserver = globalThis.MutationObserver;
+  const prevRaf = globalThis.requestAnimationFrame;
+
+  globalThis.document = document;
+  globalThis.NodeFilter = { SHOW_ELEMENT: 1, SHOW_TEXT: 4 };
+  globalThis.MutationObserver = FakeMutationObserver;
+  globalThis.requestAnimationFrame = fn => { fn(); return 1; };
+
+  try {
+    const restoreBtn = new FakeElement('button');
+    const restoreTxt = new FakeText('Restore Conversation');
+    restoreBtn.append(restoreTxt);
+
+    const replyLabel = new FakeElement('span');
+    const replyTxt = new FakeText('Agent response');
+    replyLabel.append(replyTxt);
+
+    const ctrlLabel = new FakeElement('span');
+    const ctrlTxt = new FakeText('Remote Control');
+    ctrlLabel.append(ctrlTxt);
+
+    const bgLabel = new FakeElement('span');
+    const bgTxt = new FakeText('Background Task');
+    bgLabel.append(bgTxt);
+
+    const proseHeading = new FakeElement('div');
+    const proseTxt = new FakeText('Close old PRs before release');
+    proseHeading.append(proseTxt);
+
+    const closeBtn = new FakeElement('button');
+    const closeBtnTxt = new FakeText('Close Sidebar');
+    closeBtn.append(closeBtnTxt);
+
+    document.body.append(restoreBtn, replyLabel, ctrlLabel, bgLabel, proseHeading, closeBtn);
+    const tr = createHostTranslator({ enabled: true, language: 'zh-TW' });
+
+    assert.equal(restoreTxt.nodeValue, '恢復對話');
+    assert.equal(replyTxt.nodeValue, '智能體回覆');
+    assert.equal(ctrlTxt.nodeValue, '遠程控制');
+    assert.equal(bgTxt.nodeValue, '後臺任務');
+    assert.equal(proseTxt.nodeValue, 'Close old PRs before release', 'Broad Close pattern must not corrupt non-control text');
+    assert.equal(closeBtnTxt.nodeValue, '關閉 Sidebar', 'Close pattern still translates UI buttons');
+
+    // Simulate detached DOM nodes across 40 flushes; periodic pruning must release them
+    const beforeCount = tr._trackedCounts().texts;
+    assert.ok(beforeCount >= 5);
+    restoreTxt.isConnected = false;
+    replyTxt.isConnected = false;
+    for (let i = 0; i < 40; i++) tr.scan();
+    assert.ok(tr._trackedCounts().texts <= beforeCount - 2, 'Detached text nodes must be pruned from trackedTexts');
+
+    tr.dispose();
+    assert.deepEqual(tr._trackedCounts(), { texts: 0, attrs: 0 });
+  } finally {
+    globalThis.document = prevDoc;
+    globalThis.NodeFilter = prevNodeFilter;
+    globalThis.MutationObserver = prevObserver;
+    globalThis.requestAnimationFrame = prevRaf;
+  }
+});

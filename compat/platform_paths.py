@@ -1,4 +1,5 @@
 """Desktop app discovery and user paths without Windows environment assumptions."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -27,10 +28,24 @@ def platform_paths(platform=None, home=None, env=None):
             candidates.insert(0, Path(executable).resolve().parent / 'resources' / 'app.asar')
     else:
         raise RuntimeError('Supported platforms: Windows, Linux, macOS')
+    settings = local / 'AntigravityPulse' / 'settings.json'
+    saved = {}
+    try:
+        if settings.is_file():
+            parsed = json.loads(settings.read_text(encoding='utf-8-sig'))
+            if isinstance(parsed, dict):
+                saved = parsed
+    except (OSError, ValueError):
+        saved = {}
+    if isinstance(saved.get('appResources'), str) and saved['appResources'].strip():
+        candidates.insert(0, Path(saved['appResources']).expanduser() / 'app.asar')
     if env.get('AG_PULSE_APP_ASAR'):
         candidates = [Path(env['AG_PULSE_APP_ASAR']).expanduser()]
     app = next((p for p in candidates if p.is_file()), candidates[0])
-    profile = Path(env['AG_PULSE_PROFILE']).expanduser() if env.get('AG_PULSE_PROFILE') else config / 'Antigravity'
+    saved_profile = saved.get('profile') if isinstance(saved.get('profile'), str) and saved['profile'].strip() else None
+    profile = Path(env['AG_PULSE_PROFILE']).expanduser() if env.get('AG_PULSE_PROFILE') else (
+        Path(saved_profile).expanduser() if saved_profile else config / 'Antigravity'
+    )
     return dict(home=home, local=local, profile=profile, app=app,
-                settings=local / 'AntigravityPulse' / 'settings.json',
+                settings=settings,
                 backups=local / 'AntigravityPulseBackups')

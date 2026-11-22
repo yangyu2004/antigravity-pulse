@@ -81,12 +81,13 @@ export class AntigravityClient {
     const standalone = (Array.isArray(parsed) ? parsed : [parsed]).filter(p => /--standalone\b/.test(p.CommandLine || ''));
     const envEp = endpointFromEnv(this.env);
     if (standalone.length === 1 && !/--csrf_token(?:=|\s+)/.test(standalone[0].CommandLine || '') && envEp) {
-      const ports = new Set([standalone[0].Ports].flat().map(Number));
+      const ports = new Set([standalone[0].Ports].flat().map(Number).filter(p => Number.isInteger(p) && p > 0));
       if (ports.has(envEp.port)) {
         this.server = { ...envEp, pid: standalone[0].ProcessId };
         this.discoveredAt = this.now();
         return this.server;
       }
+      throw new Error(ports.size > 0 ? 'Antigravity 后台已重启，等待新 Sidecar 接管' : '等待 Antigravity 本地接口启动');
     }
     let foundLog=false,lastError=null;
     const paths=this.paths();

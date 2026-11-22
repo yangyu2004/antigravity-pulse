@@ -221,6 +221,43 @@ class ReloadIdleSidecarTests(unittest.TestCase):
             self.assertFalse(reloaded)
             self.assertEqual(killed_pids, [])
 
+    @patch('os.kill', return_value=None)
+    def test_unrelated_path_containing_plugin_name_rejected(self, mock_kill):
+        """Strict path matching rejects unrelated paths containing 'antigravity-pulse' substring."""
+        mock_ps = subprocess.CompletedProcess(
+            args=['ps'],
+            returncode=0,
+            stdout=f"{os.getuid()} /usr/local/bin/node /tmp/antigravity-pulse-notes/main.mjs\n",
+            stderr=""
+        )
+        mock_lsof = subprocess.CompletedProcess(
+            args=['lsof'],
+            returncode=0,
+            stdout="p99999\nn/tmp/antigravity-pulse-notes\n",
+            stderr=""
+        )
+        with patch('subprocess.run', side_effect=[mock_ps, mock_lsof]):
+            self.assertFalse(auto_updater._is_panel_sidecar_proc(99999, os.getuid()))
+
+    def test_busy_reload_persists_pending_reload_and_retries_when_idle(self):
+        plugin_dir = self.home / '.gemini' / 'config' / 'plugins' / 'antigravity-pulse'
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / 'plugin.json').write_text(json.dumps({'name': 'antigravity-pulse', 'version': '0.9.9'}))
+        settings = self.home / 'settings.json'
+        settings.write_text(json.dumps({'enabled': True, 'autoUpdate': True}))
+        def fake_worker(_worker, args, _cwd, _timeout):
+            if args[0] == 'check':
+                return {'host': 'app', 'currentVersion': '0.9.9', 'latestVersion': '0.9.10', 'hasUpdate': True}
+            return {'version': '0.9.10', 'verified': True}
+        with patch.object(auto_updater, 'load_paths', return_value={'home': self.home, 'settings': settings}), \
+             patch.object(auto_updater, 'reload_idle_sidecar', side_effect=[False, True]) as mock_reload:
+            r1 = auto_updater.run_auto_update(home=self.home, target=plugin_dir, worker_runner=fake_worker)
+            self.assertEqual(r1['status'], 'updated')
+            self.assertFalse(r1['reloaded'])
+            r2 = auto_updater.run_auto_update(home=self.home, target=plugin_dir, worker_runner=fake_worker)
+            self.assertEqual(r2['status'], 'throttled')
+            self.assertEqual(mock_reload.call_count, 2, 'Pending reload must be retried on subsequent idle check')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,9 +7,12 @@ module.exports = function createIdeSurface() {
     // VS Code requires TrustedHTML and owns all permitted policies. Build this
     // plugin's fixed template using DOM operations, without adding a policy or
     // weakening the host CSP. Never pass model responses or host HTML here.
-    const tags=new Set('style div span button strong section dl dt dd p i svg path circle ellipse rect header h1 h2 nav footer table thead tbody tr th td details summary'.split(' '));
+    const tags=new Set('style div span label button strong section dl dt dd p i svg path circle ellipse rect header h1 h2 nav footer table thead tbody tr th td details summary'.split(' '));
     const entities={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:'\u00a0'};
-    const decode=s=>s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi,(all,key)=>key[0]==='#'?String.fromCodePoint(parseInt(key.slice(key[1]?.toLowerCase()==='x'?2:1),key[1]?.toLowerCase()==='x'?16:10)):entities[key]||all);
+    const decode=s=>s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi,(all,key)=>{
+      if(key[0]==='#'){const cp=parseInt(key.slice(key[1]?.toLowerCase()==='x'?2:1),key[1]?.toLowerCase()==='x'?16:10);return Number.isInteger(cp)&&cp>=0&&cp<=0x10ffff?String.fromCodePoint(cp):all;}
+      return entities[key.toLowerCase()]||all;
+    });
     const fragment=document.createDocumentFragment(),stack=[fragment];let offset=0;
     const token=/<\/?([a-z][\w-]*)(\s[^<>]*?)?\s*\/?\s*>/gi;
     for(let match;(match=token.exec(markup));){

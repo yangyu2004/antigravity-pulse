@@ -163,7 +163,7 @@ export class MetricsStore {
     const id = conversationId.toLowerCase();
     const reader = this.client?.reader;
     if (!reader) return null;
-    const isRunning = s => Boolean(s && !/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s)));
+    const isRunning = s => Boolean(s && /RUNNING|IN_PROGRESS|GENERATING|EXECUTING|WAITING|PENDING|ACTIVE|STREAMING/i.test(String(s)) && !/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s)));
     const isSettled = s => Boolean(s && /IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/i.test(String(s)));
     try {
       const now = typeof this.client?.now === 'function' ? this.client.now() : Date.now();

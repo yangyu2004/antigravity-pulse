@@ -1,4 +1,4 @@
-:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:12px}
+:root{color-scheme:var(--pulse-scheme,light dark);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:12px}
 *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--pulse-background,var(--pulse-page,transparent));color:var(--pulse-foreground)}
 body:not(.standalone){background:var(--pulse-background,var(--pulse-page,transparent))!important;color:var(--pulse-foreground)!important}
 body.standalone{background:var(--pulse-page);min-height:100vh;min-height:100dvh;display:grid;place-items:center}

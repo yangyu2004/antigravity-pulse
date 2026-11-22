@@ -96,7 +96,7 @@ function render() {
   $('strip-tps').textContent = rate(speed?.tps);
   $('speed-tab').title=rate(speed?.tps)+' tok/s';
   $('session-tps').textContent = rate(speed?.tps);
-  $('latest-tps').textContent = speed?.latestRateStatus==='unreliable'?t('timingUnreliable'):speed?.latestRateStatus==='legacy'?t('ratePending'):rate(speed?.latestTps);
+  $('latest-tps').textContent = speed?.latestRateStatus==='unreliable'?t('timingUnreliable'):speed?.latestRateStatus==='legacy'?t('ratePending'):(typeof speed?.latestTps==='number'&&Number.isFinite(speed.latestTps)?`${rate(speed.latestTps)} tok/s`:'—');
   $('request-count').textContent = t('sampleCount',{n:speed?.measuredRequests??0});
   $('session-steps').textContent = speed ? t('rounds',{rounds:speed.rounds,steps:speed.steps}) : '';
   $('strip-model').textContent = speed?.model || t('waitingRequest');
@@ -104,7 +104,7 @@ function render() {
   $('model-time').textContent = language.elapsed(speed?.modelSeconds);
   $('tool-time').textContent = language.elapsed(speed?.toolSeconds);
   $('ttft').textContent = language.elapsed(speed?.ttftSeconds);
-  $('token-detail').textContent = speed ? `${count(speed.counts.responseOutput)} / ${count(speed.counts.thinkingOutput)} tok` : '—';
+  $('token-detail').textContent = speed?.counts ? `${count(speed.counts.responseOutput)} / ${count(speed.counts.thinkingOutput)} tok` : '—';
   const savedNote=speed?.restoredFromHistory?' '+t('savedStats',{time:speed.savedAt?language.resetDate(speed.savedAt):'—'}):'';
   const saveWarning=snapshot.persistenceError?' '+t('saveFailed'):'';
   $('speed-basis').textContent = language.rateNote(speed)+savedNote+saveWarning;
@@ -215,9 +215,9 @@ $('quota-group').addEventListener('change', event => { selectedGroup = event.tar
 $('refresh-button').addEventListener('click', refreshManually);
 languagePicker=language.mountLanguagePicker({button:$('language-toggle'),parent:document.body,choose:value=>preferences.choose(value)});
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-window.addEventListener('pagehide',()=>{preferences.dispose();languagePicker.close(false);});
-window.addEventListener('pageshow',event=>{if(event.persisted)preferences=connectPreferences();});
-setInterval(updateCountdowns,1000);
+let countdownTimer = setInterval(updateCountdowns, 1000);
+window.addEventListener('pagehide',()=>{clearTimeout(timer);clearInterval(countdownTimer);countdownTimer=null;preferences.dispose();languagePicker.close(false);});
+window.addEventListener('pageshow',event=>{if(event.persisted){preferences=connectPreferences();if(!countdownTimer)countdownTimer=setInterval(updateCountdowns,1000);refresh();}});
 localize();
 showCard('speed');
 refresh();

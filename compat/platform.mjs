@@ -28,6 +28,16 @@ export function platformPaths({ platform = process.platform, home = homedir(), e
   };
 }
 
+const SENSITIVE_ENV_RE = /^ANTIGRAVITY_(?:CSRF_TOKEN|LS_ADDRESS|SIDECAR_)/i;
+
+export function cleanChildEnv(env = process.env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    if (!SENSITIVE_ENV_RE.test(k) && v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 export function agentExecutables({ platform = process.platform, home = homedir(), env = process.env, arch = process.arch } = {}) {
   if (env.ANTIGRAVITY_AGENTAPI_EXE) return [env.ANTIGRAVITY_AGENTAPI_EXE];
   const roots = platform === 'win32' ? [join(env.LOCALAPPDATA || join(home,'AppData','Local'),'Programs','antigravity','resources')]
@@ -35,7 +45,9 @@ export function agentExecutables({ platform = process.platform, home = homedir()
     : ['/opt/Antigravity/resources','/opt/antigravity/resources','/usr/share/antigravity/resources'];
   if (env.AG_PULSE_APP_RESOURCES) roots.unshift(env.AG_PULSE_APP_RESOURCES);
   try { const saved=JSON.parse(readFileSync(platformPaths({platform,home,env}).settings,'utf8').replace(/^\uFEFF/,''));if(typeof saved.appResources==='string')roots.unshift(saved.appResources); } catch {}
-  const names = platform === 'win32' ? ['language_server.exe'] : ['language_server',`language_server_${platform === 'darwin' ? 'macos' : 'linux'}_${arch === 'arm64' ? 'arm' : 'x'}64`, `language_server_${platform === 'darwin' ? 'macos' : 'linux'}`];
+  const names = platform === 'win32'
+    ? ['language_server.exe', `language_server_windows_${arch === 'arm64' ? 'arm64' : 'x64'}.exe`]
+    : ['language_server',`language_server_${platform === 'darwin' ? 'macos' : 'linux'}_${arch === 'arm64' ? 'arm' : 'x'}64`, `language_server_${platform === 'darwin' ? 'macos' : 'linux'}`];
   return roots.flatMap(root => names.map(name => join(root,'bin',name)));
 }
 

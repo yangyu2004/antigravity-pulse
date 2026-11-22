@@ -27,7 +27,7 @@ module.exports = function installAgPulseInlineWidget() {
   let refreshRequest=null,manualRequest=null,requestEpoch=0,disposed=false;
   let composer=null,layoutFrame=null;
   let usageDashboard=null,updateMenu=null;
-  let densityFrame=null,densityMotion=null,densityProbe=null,compactProbe=null;
+  let densityFrame=null,densityMotion=null,densityProbe=null,compactProbe=null,lastDensityChangeAt=0,lastFitRowWidth=0;
   const densityMedia=matchMedia('(prefers-reduced-motion: reduce)');
   const densityEase='cubic-bezier(0.32,0.72,0,1)';
   let guideReady=false,guideDismissed=false,guideOpened=false,guideSaving=false,guideError=false,usageGuideDismissed=false;
@@ -283,8 +283,12 @@ module.exports = function installAgPulseInlineWidget() {
     };
     let safe=false;
     const rowWidth=composer.row.getBoundingClientRect().width;
-    const probeKey=()=>node.style.cssText.replace(/--pulse-native-room:[^;]+;?/g,'')+'|'+language.language+'|'+lastConversation+'|'+(composer.model?.textContent||'')+'|'+bar.textContent+'|'+$('dot').className+'|'+getComputedStyle(composer.row).gap+'|'+Array.from(composer.row.querySelectorAll('button,[role="button"],a[href],input,select')).filter(c=>c!==composer.model&&!c.contains(composer.model)).map(c=>c.getBoundingClientRect().width).join(',');
+    const rowResized=Math.abs(rowWidth-lastFitRowWidth)>=12;
+    if(rowResized)lastFitRowWidth=rowWidth;
+    const probeKey=()=>node.style.cssText.replace(/--pulse-native-room:[^;]+;?/g,'')+'|'+language.language+'|'+lastConversation+'|'+(composer.model?.textContent||'')+'|'+($('task-chip')?.hidden?'0':'1')+'|'+$('dot').className+'|'+getComputedStyle(composer.row).gap+'|'+Array.from(composer.row.querySelectorAll('button,[role="button"],a[href],input,select')).filter(c=>c!==composer.model&&!c.contains(composer.model)).map(c=>Math.round(c.getBoundingClientRect().width)).join(',');
     const key=probeKey();
+    const canUpgrade=probe=>!probe||rowWidth>=probe.width+12||(key!==probe.key&&(rowResized||Date.now()-lastDensityChangeAt>1200));
+    const oldCompact=node.dataset.compact==='labels';
     const fitCompactOrIcons=(capturePrev)=>{
       node.dataset.compact='labels';
       if(fits()){compactProbe={key,width:rowWidth};densityProbe=null;return true;}
@@ -299,7 +303,7 @@ module.exports = function installAgPulseInlineWidget() {
     if(oldDensity==='icons'){
       // Twelve pixels of recovery headroom prevents threshold chatter. Shrinking
       // or scrolling in icon mode never toggles back to full just to measure it.
-      if(!densityProbe||key!==densityProbe.key||rowWidth>=densityProbe.width+12){
+      if(canUpgrade(densityProbe)){
         previous=densitySnapshot(previous);node.classList.remove('icons-only');delete node.dataset.compact;safe=fits();
         if(safe){densityProbe=null;compactProbe=null;}
         else safe=fitCompactOrIcons(false);
@@ -307,8 +311,7 @@ module.exports = function installAgPulseInlineWidget() {
         safe=fits();
       }
     }else{
-      const oldCompact=node.dataset.compact==='labels';
-      if(oldCompact&&compactProbe&&key===compactProbe.key&&rowWidth<compactProbe.width+12){
+      if(oldCompact&&!canUpgrade(compactProbe)){
         safe=fits();
         if(!safe){
           previous=densitySnapshot(previous);delete node.dataset.compact;node.classList.add('icons-only');safe=fits();
@@ -320,7 +323,10 @@ module.exports = function installAgPulseInlineWidget() {
         else safe=fitCompactOrIcons(true);
       }
     }
-    node.dataset.density=node.classList.contains('icons-only')?'icons':'full';
+    const nextDensity=node.classList.contains('icons-only')?'icons':'full';
+    const nextCompact=node.dataset.compact==='labels';
+    if(nextDensity!==oldDensity||nextCompact!==oldCompact)lastDensityChangeAt=Date.now();
+    node.dataset.density=nextDensity;
     const state=safe?'ready':'blocked';
     if(node.dataset.layout!==state){node.dataset.layout=state;node.inert=!safe;if(!safe)hide();}
     const changed=safe&&oldReady&&previous?.row===composer.row&&oldDensity!==node.dataset.density;
@@ -401,7 +407,7 @@ module.exports = function installAgPulseInlineWidget() {
   function observeComposer(){
     resizeObserver?.disconnect();
     resizeObserver??=new ResizeObserver(scheduleLayout);
-    for(const element of new Set([node,composer.row,composer.row.parentElement,composer.branch,composer.editor]))resizeObserver.observe(element);
+    for(const element of new Set([composer.row,composer.row.parentElement,composer.branch,composer.editor]))resizeObserver.observe(element);
   }
   function composerLayout({row,editor,branch}){
     // Containment alone can join an app header and a distant message editor.
@@ -529,13 +535,14 @@ module.exports = function installAgPulseInlineWidget() {
     catch{guideError=true;}
     finally{guideSaving=false;updateGuide();}
   }
+  const CANCEL_LABEL_RE=/^(?:cancel|stop)(?:\b|\s|$)|^(?:取消|停止)/i;
   function findComposer(){
     if(surface)return surface.findComposer(composer);
     const visible=visibleHostElement;
     const semanticEditors=Array.from(document.querySelectorAll('[role="combobox"][contenteditable="true"],[role="textbox"][contenteditable="true"]')).filter(visible);
-    const editors=Array.from(new Set([...semanticEditors,...Array.from(document.querySelectorAll('[aria-label="Message input"]')).filter(visible)]));
+    const editors=Array.from(new Set([...semanticEditors,...Array.from(document.querySelectorAll('[aria-label="Message input"],[aria-label="消息输入框"],[aria-label="訊息輸入框"]')).filter(visible)]));
     const stableModels=Array.from(document.querySelectorAll('[data-testid="model-selector-trigger"]')).filter(visible);
-    const models=stableModels.length?stableModels:Array.from(document.querySelectorAll('button[role="combobox"][aria-haspopup],button[aria-label^="Select model"]')).filter(visible);
+    const models=stableModels.length?stableModels:Array.from(document.querySelectorAll('button[role="combobox"][aria-haspopup],button[aria-label^="Select model"],button[aria-label^="选择模型"],button[aria-label^="選擇模型"]')).filter(visible);
     const pairs=[];
     const ownsEditor=(element,editor)=>element.closest('[data-testid="agent-input-box"]')===editor.closest('[data-testid="agent-input-box"]');
     for(const model of models)for(const editor of editors){
@@ -561,7 +568,7 @@ module.exports = function installAgPulseInlineWidget() {
       if(!activeEditors.includes(editor)||activeEditors.length!==1)continue;
       if(Array.from(box.querySelectorAll('[data-testid="model-selector-trigger"]')).some(e=>owned(e)&&visible(e)))continue;
       const controls=Array.from(box.querySelectorAll('[data-testid="input-send-button"],[data-testid="send-button"],[data-tooltip-id*="send-button"],[data-testid="input-stop-button"],[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"],button[aria-label]'))
-        .filter(e=>owned(e)&&visible(e)&&(e.hasAttribute('data-testid')&&/^(?:input-)?(send|stop|cancel)-button$/.test(e.dataset.testid)||e.getAttribute('data-tooltip-id')?.includes('send-button')||/^(?:cancel|stop|取消|停止)(?:\b|\s|生成|任务|响应|$)/i.test(e.getAttribute('aria-label')||'')));
+        .filter(e=>owned(e)&&visible(e)&&(e.hasAttribute('data-testid')&&/^(?:input-)?(send|stop|cancel)-button$/.test(e.dataset.testid)||e.getAttribute('data-tooltip-id')?.includes('send-button')||CANCEL_LABEL_RE.test(e.getAttribute('aria-label')||'')));
       for(const send of controls){
         let row=send.parentElement,distance=1;
         while(row?.parentElement&&row.parentElement!==box&&!row.parentElement.contains(editor)){row=row.parentElement;distance++;}
@@ -618,19 +625,21 @@ module.exports = function installAgPulseInlineWidget() {
       if(visibleCardScopes().length&&!lastFetch)queueMicrotask(()=>{if(!disposed)refresh(true);});
       return;
     }
+    const prevBranch=composer?.branch;
     found.native=composer?.branch===found.branch&&composer?.anchor===found.anchor?composer.native:captureNative(found);
     if(found.kind==='ide')found.native.reserve=surface.nativeReserve(found);
     composer=found;
     if(syncConversation())render();
     const {editor,model,row,branch}=found;
     if(node)node.dataset.scope=found.kind;
-    if(node?.isConnected&&node.parentElement===row&&node.previousElementSibling===branch)return;
+    if(node?.isConnected&&node.parentElement===row&&(node.previousElementSibling===branch||prevBranch===branch))return;
     if(node){stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;hide();row.insertBefore(node,branch.nextSibling);observeComposer();themeController?.dispose();themeController=theme.attach(node,{embedded:true});if(data?.theme)themeController.setHostTheme(data.theme);fit();position();return;}
-    resizeObserver?.disconnect();node?.remove();node=document.createElement('div');node.id=ID;
-    node.dataset.scope=found.kind;
-    node.style.cssText='display:flex;align-items:center;flex:0 1 auto;min-width:0;max-width:min(100%,var(--pulse-native-room,100%));height:28px;margin:0 5px;position:relative;';
-    root=node.attachShadow({mode:'open'});
-    setMarkup(root,`<style>${theme.shadowCss()}
+    const prevNode=node;
+    const nextNode=document.createElement('div');nextNode.id=ID;
+    nextNode.dataset.scope=found.kind;
+    nextNode.style.cssText='display:flex;align-items:center;flex:0 1 auto;min-width:0;max-width:min(100%,var(--pulse-native-room,100%));height:28px;margin:0 5px;position:relative;';
+    const nextRoot=nextNode.attachShadow({mode:'open'});
+    setMarkup(nextRoot,`<style>${theme.shadowCss()}
       :host{color-scheme:var(--pulse-scheme);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--pulse-foreground);font-size:11px}*{box-sizing:border-box}[hidden]{display:none!important}button,select{font:inherit}button{cursor:pointer}svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round;flex:none}button:focus-visible,select:focus-visible{outline:2px solid var(--pulse-accent);outline-offset:2px}
       .bar{display:flex;justify-content:flex-start;width:100%;align-items:center;gap:7px;min-height:28px;padding:2px 0}.chip{display:flex;align-items:center;gap:6px;color:var(--pulse-chip);background:none;border:0;border-radius:5px;padding:3px 6px;white-space:nowrap;line-height:18px}.chip:hover,.chip[aria-expanded=true]{background:var(--pulse-hover);color:var(--pulse-hover-text)}.chip strong{font-weight:500;font-variant-numeric:tabular-nums}.dim{color:var(--pulse-muted)}.countdown{font-size:10px;font-variant-numeric:tabular-nums}.dot{width:4px;height:4px;background:var(--pulse-dot);border-radius:50%;flex:none}.dot.live{background:var(--pulse-success)}.dot.stale{background:var(--pulse-warning)}.group{color:var(--pulse-muted);font-size:10px;margin-right:1px}.card{position:fixed;inset:auto;margin:0;z-index:2147483000;padding:13px 14px 11px;border-radius:13px;background:linear-gradient(145deg,var(--pulse-card),var(--pulse-card-end));box-shadow:0 8px 32px var(--pulse-shadow);border:1px solid var(--pulse-border);color:var(--pulse-foreground);font-size:12px}.card::backdrop{background:transparent;pointer-events:none}.card[hidden]{display:none}dl>[hidden]{display:none}.heading{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;margin-bottom:9px;border-bottom:1px solid var(--pulse-separator);font-weight:600}.heading span{display:flex;align-items:center;gap:7px}.tag{font-size:10px;font-weight:400;color:var(--pulse-muted)}dl{margin:0}dl div{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:8px 0}dt{color:var(--pulse-label);font-size:11px}dd{margin:0;font-size:11px;font-variant-numeric:tabular-nums;text-align:right}.emphasis dd{font-weight:600;color:var(--pulse-emphasis)}.footnote{font-size:10px;color:var(--pulse-subtle);line-height:1.6;margin:10px 0 0}.balance{display:flex;align-items:baseline;gap:8px;margin:12px 0}.balance strong{font-size:27px;font-weight:550;letter-spacing:-.6px;font-variant-numeric:tabular-nums}.balance span{color:var(--pulse-muted);font-size:11px}.track{height:4px;border-radius:3px;background:var(--pulse-track);margin:12px 0 14px;overflow:hidden}.track i{height:100%;display:block;background:var(--pulse-accent);width:0}select{color:var(--pulse-control-text);background:var(--pulse-control);border:0;border-radius:4px;font-size:10px;padding:3px 5px;max-width:120px}.toolbar{display:flex;align-items:center;gap:7px}.refresh{color:var(--pulse-muted);border:0;background:transparent;padding:0 3px;font-size:14px}.reset{color:var(--pulse-emphasis)}.rounds,.group,.dot.live{display:none}.chip[hidden]{display:none}.toolbar{position:relative}.group-trigger{color:var(--pulse-control-text);background:var(--pulse-control);border:0;border-radius:5px;font-size:10px;padding:4px 7px;white-space:nowrap}.group-menu{position:absolute;top:calc(100% + 5px);right:22px;min-width:132px;padding:4px;background:var(--pulse-menu);border:1px solid var(--pulse-border);border-radius:7px;box-shadow:0 6px 20px var(--pulse-shadow);z-index:10}.group-menu[hidden]{display:none}.group-menu button{display:block;width:100%;padding:7px 9px;border:0;border-radius:4px;background:none;color:var(--pulse-foreground);text-align:left;white-space:nowrap}.group-menu button:hover,.group-menu button[aria-selected=true]{background:var(--pulse-selected)}.chip{padding:2px 4px;font-size:10px;gap:4px;min-width:0}.bar{gap:3px}.language-button{border:0;background:none;color:var(--pulse-muted);border-radius:4px;font-size:9px;padding:3px 4px;margin-left:auto;cursor:pointer;flex:none}.language-button:hover{color:var(--pulse-hover-text);background:var(--pulse-hover)}:host(.compact) .countdown{display:none}:host(.narrow) .cache-total{display:none}:host(.narrow) [data-card="cache"] .dim{display:none}:host(.narrow) .chip svg{display:none}:host(.narrow) .chip{padding:2px 3px;font-size:9px}:host(.narrow) .bar{gap:0}
 
@@ -645,7 +654,7 @@ module.exports = function installAgPulseInlineWidget() {
     .bar{gap:6px}.chip{font-size:11px;gap:5px;padding:3px 5px}.context-card>strong{font-size:16px}.context-card>p{margin:8px 0}.quota-heading{margin-top:14px;padding-top:12px;border-top:1px solid var(--pulse-separator)}.quota-title{display:flex;align-items:center;gap:6px;font-size:11px}.quota-title>span:first-child{display:flex;align-items:center;gap:6px;margin-right:auto}.quota-title strong{font-variant-numeric:tabular-nums;font-size:13px}.quota-section+.quota-section{border-top:1px solid var(--pulse-separator);margin-top:12px;padding-top:12px}.quota-section .track{margin:8px 0}.quota-section .footnote{margin-top:6px}.quota-section dl div{margin:6px 0}.context-label{white-space:nowrap}
     :host([data-compact=labels]) .bar{gap:4px}:host([data-compact=labels]) .chip{padding:2px 4px;font-size:10.5px;gap:4px}:host([data-compact=labels]) .cache-total,:host([data-compact=labels]) .context-label,:host([data-compact=labels]) .task-title-snippet{display:none}
     :host(.icons-only) .bar{gap:2px}:host(.icons-only) .chip{flex:0 0 24px;width:24px;min-width:24px;height:24px;padding:0;gap:0;justify-content:center}:host(.icons-only) .chip>:not(svg):not(.context-ring):not(.task-indicator){display:none}:host(.icons-only) .bar>.language-button,:host(.icons-only) .bar>.dot{display:none}:host(.icons-only) .chip svg{display:block}.card-language{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--pulse-separator);font-size:10px;color:var(--pulse-muted)}
-    .usage-entry{margin-top:10px;padding-top:10px;border-top:1px solid var(--pulse-separator)}.usage-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}.usage-summary>div{padding:6px 8px;border-radius:7px;background:var(--pulse-control);border:1px solid var(--pulse-separator);display:flex;flex-direction:column;gap:2px}.usage-summary label{font-size:9.5px;color:var(--pulse-muted)}.usage-summary strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}.usage-unit{font-size:9.5px;color:var(--pulse-muted);font-weight:400;margin-left:3px}#open-usage{width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-radius:7px;border:1px solid var(--pulse-border);background:var(--pulse-control);color:var(--pulse-foreground);font-size:10.5px;font-weight:500;cursor:pointer;transition:background 140ms ease}#open-usage:hover{background:var(--pulse-hover)}.quota-details{margin-top:12px;padding-top:11px;border-top:1px solid var(--pulse-separator)}
+    .usage-entry{margin-top:10px;padding-top:10px;border-top:1px solid var(--pulse-separator)}.usage-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}.usage-summary>div{padding:6px 8px;border-radius:7px;background:var(--pulse-control);border:1px solid var(--pulse-separator);display:flex;flex-direction:column;gap:2px}.usage-summary .usage-label{font-size:9.5px;color:var(--pulse-muted)}.usage-summary strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}.usage-unit{font-size:9.5px;color:var(--pulse-muted);font-weight:400;margin-left:3px}#open-usage{width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-radius:7px;border:1px solid var(--pulse-border);background:var(--pulse-control);color:var(--pulse-foreground);font-size:10.5px;font-weight:500;cursor:pointer;transition:background 140ms ease}#open-usage:hover{background:var(--pulse-hover)}.quota-details{margin-top:12px;padding-top:11px;border-top:1px solid var(--pulse-separator)}
     .refresh{display:inline-grid;place-items:center}.refresh[aria-busy=true]{color:var(--pulse-emphasis);cursor:wait}.refresh[aria-busy=true] svg{animation:pulse-refresh-spin 1s linear infinite;transform-origin:center}
     @keyframes pulse-refresh-spin{to{transform:rotate(360deg)}}
     .task-chip{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:5px;font-size:11px;color:var(--pulse-chip);background:transparent;border:0;transition:all 140ms ease;cursor:pointer;}
@@ -740,8 +749,8 @@ module.exports = function installAgPulseInlineWidget() {
       <p class="footnote" id="cache-note" hidden></p>
       <div class="usage-entry" id="usage-entry">
         <div class="usage-summary">
-          <div><label id="usage-today-label">今日用量</label><strong><span id="usage-today">—</span><span class="usage-unit">Token</span></strong></div>
-          <div><label id="usage-month-label">本月用量</label><strong><span id="usage-month">—</span><span class="usage-unit">Token</span></strong></div>
+          <div><span class="usage-label" id="usage-today-label">今日用量</span><strong><span id="usage-today">—</span><span class="usage-unit">Token</span></strong></div>
+          <div><span class="usage-label" id="usage-month-label">本月用量</span><strong><span id="usage-month">—</span><span class="usage-unit">Token</span></strong></div>
         </div>
         <button type="button" id="open-usage"><span id="usage-open-label">查看用量统计</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8 4l4 4-4 4"/></svg></button>
       </div>
@@ -768,6 +777,7 @@ module.exports = function installAgPulseInlineWidget() {
       </div>
     </section>
     <section class="card task-progress-card" id="task-progress-card" role="region" data-i18n-aria="taskCardTitle" aria-label="项目分阶段进度与防卡住监控" hidden><div class="tp-header"><div class="tp-gauge"><svg class="tp-ring-svg" viewBox="0 0 44 44"><circle class="tp-ring-track" cx="22" cy="22" r="18"/><circle class="tp-ring-fill" id="tp-ring-fill" cx="22" cy="22" r="18" stroke-dasharray="113.1" stroke-dashoffset="113.1"/></svg><div class="tp-gauge-text" id="tp-gauge-percent">0%</div></div><div class="tp-meta"><div class="tp-status-row"><span class="tp-badge" id="tp-status-badge">● 进行中</span><span class="tp-elapsed" id="tp-elapsed">00:00</span><button type="button" class="tp-btn-reinvoke" id="tp-reinvoke-btn" title="检测到卡顿时立即重新调起">⚡ 重新调起</button></div><div class="tp-headline" id="tp-headline">正在检测项目进度...</div><div class="tp-track"><div class="tp-track-fill" id="tp-track-fill"></div></div></div><button type="button" class="tp-close" id="tp-close-btn" title="收起">✕</button></div><div class="tp-stalled-banner" id="tp-stalled-banner" hidden><svg viewBox="0 0 16 16" class="tp-warn-icon"><path d="M8 2l6.5 11.5H1.5L8 2zM8 6.5v3M8 11.5h.01"/></svg><div class="tp-stalled-text" id="tp-stalled-text">检测到当前任务超过 35 秒无日志更新，可能处于卡顿状态</div></div><div class="tp-objective" id="tp-objective">实时监控当前窗口项目进度，防止执行卡死</div><div class="tp-section-header"><span class="tp-section-title" id="tp-section-title">📋 项目分阶段执行进度</span><span class="tp-source-tag" id="tp-source-tag">数据源: transcript.jsonl</span></div><div class="tp-steps-list" id="tp-steps-list"></div><div class="tp-footer"><span class="tp-task-log" id="tp-task-log">准备就绪</span><button type="button" class="tp-refresh-btn" id="tp-refresh-btn" title="刷新进度">刷新</button></div></section>`);
+    resizeObserver?.disconnect();prevNode?.remove();node=nextNode;root=nextRoot;
     row.insertBefore(node,branch.nextSibling);
     for(const card of root.querySelectorAll('.card')){const note=document.createElement('p');note.className='scope-note';note.dataset.i18n='subagentStats';card.querySelector('.heading')?.after(note);}
     const languageRow=document.createElement('div');languageRow.className='card-language';
@@ -841,17 +851,16 @@ module.exports = function installAgPulseInlineWidget() {
     render();refresh();
   }
   const escHtml=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const CANCEL_LABEL_RE=/^(?:cancel|stop|取消|停止)(?:\b|\s|生成|任务|响应|$)/i;
   function findCancelButton(box){
     if(!box)return null;
     const owned=e=>{const b=e.closest('[data-testid="agent-input-box"]')||e.closest('[id="antigravity.agentSidePanelInputBox"]');return !b||b===box;};
-    const candidates=box.querySelectorAll('[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"],[data-tooltip-id*="stop"],[data-tooltip-id*="cancel"],button[aria-label]');
+    const candidates=box.querySelectorAll('[data-testid="input-stop-button"],[data-testid="input-cancel-button"],[data-testid="stop-button"],[data-testid="cancel-button"],[data-tooltip-id*="stop"],[data-tooltip-id*="cancel"],button[aria-label]');
     for(const btn of candidates){
       if(!owned(btn)||btn.disabled||!visibleHostElement(btn))continue;
       const tid=btn.getAttribute('data-testid')||'';
       const tip=btn.getAttribute('data-tooltip-id')||'';
       const aria=btn.getAttribute('aria-label')||'';
-      if(/^(?:input-cancel|stop|cancel)-button$/i.test(tid)||/(?:stop|cancel)-button/i.test(tip)||CANCEL_LABEL_RE.test(aria))return btn;
+      if(/^(?:input-)?(?:stop|cancel)-button$/i.test(tid)||/(?:stop|cancel)-button/i.test(tip)||CANCEL_LABEL_RE.test(aria))return btn;
     }
     return null;
   }
@@ -947,48 +956,79 @@ module.exports = function installAgPulseInlineWidget() {
       renderTaskProgress(data.taskProgress);
     }
   }
-  let reinvoking=false,lastTaskProgress=null,reinvokeArmedUntil=0;
+  let reinvoking=false,lastTaskProgress=null;
   const REINVOKE_PROMPT='继续推进当前任务，若刚才卡住请换种方式执行';
   const REINVOKE_CONFIRM_MS=4000;
   // 只在判定卡死时直接重新调起；模型仍在正常生成时第一次点击只"上膛"，
   // 4 秒内再点一次才会停止当前生成并发送，避免误中止刚发出的新消息。
-  function reinvokeNeedsConfirm(){
-    if(lastTaskProgress?.isStalled===true)return false;
-    if(Date.now()<reinvokeArmedUntil){reinvokeArmedUntil=0;return false;}
-    reinvokeArmedUntil=Date.now()+REINVOKE_CONFIRM_MS;
+  function reinvokeNeedsConfirm(btn,target){
+    const effectiveTp=target?.tp||lastTaskProgress;
+    if(effectiveTp?.isStalled===true)return false;
+    const armedUntil=Number(btn?.dataset?.armedUntil||0);
+    if(Date.now()<armedUntil){if(btn?.dataset)btn.dataset.armedUntil='0';return false;}
+    if(btn?.dataset)btn.dataset.armedUntil=String(Date.now()+REINVOKE_CONFIRM_MS);
     return true;
   }
-  async function onReinvokeClick(btn){
+  async function onReinvokeClick(btn,target){
     if(!btn||btn.disabled)return;
     const idleLabel='⚡ 重新调起';
-    if(reinvokeNeedsConfirm()){
+    if(reinvokeNeedsConfirm(btn,target)){
       btn.textContent='未卡住，再点一次确认';
-      setTimeout(()=>{if(Date.now()>=reinvokeArmedUntil&&!btn.disabled)btn.textContent=idleLabel;},REINVOKE_CONFIRM_MS+50);
+      const expectedUntil=btn.dataset.armedUntil;
+      setTimeout(()=>{if(btn.dataset.armedUntil===expectedUntil&&Date.now()>=Number(expectedUntil)&&!btn.disabled)btn.textContent=idleLabel;},REINVOKE_CONFIRM_MS+50);
       return;
     }
     btn.textContent='调起中…';btn.disabled=true;
     try{
-      await reinvokeHost();
+      await reinvokeHost(target);
       btn.textContent='✓ 已唤醒';refresh(true);
-    }catch{btn.textContent='调起失败';}
+    }catch(err){btn.textContent=err?.code==='draft'?'请先清空草稿':'调起失败';}
     setTimeout(()=>{btn.textContent=idleLabel;btn.disabled=false;},2000);
   }
-  async function reinvokeHost(){
+  function resolveReinvokeTarget(target){
+    const scope=target?.scope?.isConnected?target.scope:null;
+    const rawScopeId=scope?.getAttribute?.('data-cascade-id')||'';
+    const targetConvId=GUID.test(rawScopeId)?rawScopeId.toLowerCase():conversationId();
+    if(scope){
+      const pane=scope.closest('[data-testid="side-question-tab-content"]')||scope;
+      const scopedBox=pane.querySelector('[data-testid="agent-input-box"]')||pane.querySelector('[id="antigravity.agentSidePanelInputBox"]');
+      if(scopedBox&&visibleHostElement(scopedBox)){
+        const scopedEditor=scopedBox.querySelector('[contenteditable="true"]');
+        return {box:scopedBox,editor:scopedEditor,convId:targetConvId};
+      }
+      const composerScope=composer?.box?.closest('[data-testid="side-question-tab-content"]')?.querySelector('[data-testid="side-question-tab-conversation"]')||composer?.box?.closest('[data-testid="conversation-view"],[data-cascade-id]');
+      if(composerScope===scope)return {box:composer?.box,editor:composer?.editor,convId:targetConvId};
+      return {box:null,editor:null,convId:targetConvId};
+    }
+    const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]')||document.getElementById('antigravity.agentSidePanelInputBox');
+    const editor=composer?.editor||box?.querySelector('[contenteditable="true"]');
+    return {box,editor,convId:targetConvId};
+  }
+  async function reinvokeHost(target){
     if(reinvoking)return;
     reinvoking=true;
     try{
-      const box=composer?.box||document.querySelector('[data-testid="agent-input-box"]');
+      const {box,editor:initialEditor,convId}=resolveReinvokeTarget(target);
+      if(!initialEditor)throw new Error('No editor');
+      const existingText=(initialEditor.textContent||'').trim();
+      if(existingText&&existingText!==REINVOKE_PROMPT){
+        const err=new Error('Draft present');err.code='draft';throw err;
+      }
       const cancelBtn=findCancelButton(box);
       if(cancelBtn){
         cancelBtn.click();
         await new Promise(r=>setTimeout(r,450));
       }
-      const targetEditor=composer?.editor||document.querySelector('[data-testid="agent-input-box"] [contenteditable="true"]');
+      const targetEditor=initialEditor.isConnected?initialEditor:resolveReinvokeTarget(target).editor;
       if(!targetEditor)throw new Error('No editor');
+      const afterCancelText=(targetEditor.textContent||'').trim();
+      if(afterCancelText&&afterCancelText!==REINVOKE_PROMPT){
+        const err=new Error('Draft present');err.code='draft';throw err;
+      }
       targetEditor.focus();
       const sel=window.getSelection();
       if(sel){const range=document.createRange();range.selectNodeContents(targetEditor);range.collapse(false);sel.removeAllRanges();sel.addRange(range);}
-      const promptText=(targetEditor.textContent||'').trim()?'':REINVOKE_PROMPT;
+      const promptText=afterCancelText?'':REINVOKE_PROMPT;
       if(promptText){
         document.execCommand?.('insertText',false,promptText);
         // 编辑器框架可能异步落字，返回值也不可靠；等一帧后看内容里是否已有提示语，
@@ -999,14 +1039,14 @@ module.exports = function installAgPulseInlineWidget() {
         }
       }
       await new Promise(r=>setTimeout(r,140));
-      const currentBox=targetEditor.closest('[data-testid="agent-input-box"]')||box;
-      const sendBtn=currentBox?.querySelector('[data-testid="input-send-button"],[data-testid="send-button"],button[aria-label*="Send"],button[aria-label*="发送"]');
+      const currentBox=targetEditor.closest('[data-testid="agent-input-box"]')||targetEditor.closest('[id="antigravity.agentSidePanelInputBox"]')||box;
+      const sendBtn=currentBox?.querySelector('[data-testid="input-send-button"],[data-testid="send-button"],[data-tooltip-id*="send-button"],button[aria-label*="Send"],button[aria-label*="发送"],button[aria-label*="傳送"]');
       if(sendBtn&&!sendBtn.disabled){
         sendBtn.click();
       }else{
         targetEditor.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
       }
-      await window.agPulseHost.taskAction?.({action:'reinvoke',conversationId:conversationId()});
+      if(convId)await window.agPulseHost.taskAction?.({action:'reinvoke',conversationId:convId});
     }finally{
       setTimeout(()=>{reinvoking=false;},1500);
     }
@@ -1054,7 +1094,8 @@ module.exports = function installAgPulseInlineWidget() {
     const lastResponse=responses[responses.length-1];
     if(!lastResponse){clearCardInScope(convScope);return;}
     const turnIdx=Number.isFinite(tp.turnStepIdx)?tp.turnStepIdx:-1;
-    const bodyDiv=lastResponse.hasAttribute('data-step-rows')?lastResponse:(lastResponse.querySelector(':scope > [data-step-list]')||lastResponse.children[1]||lastResponse);
+    const nativeChildren=Array.from(lastResponse.children).filter(c=>!c.classList?.contains('ag-pulse-inline-chat-host'));
+    const bodyDiv=lastResponse.hasAttribute('data-step-rows')?lastResponse:(lastResponse.querySelector(':scope > [data-step-list]')||nativeChildren[1]||lastResponse);
     let chatHost=Array.from(bodyDiv.children).find(c=>c.classList?.contains('ag-pulse-inline-chat-host'));
     pruneSupersededCards(convScope,lastResponse,chatHost||null);
     if(!tp.showInlineCard||!Array.isArray(tp.steps)||tp.steps.length<2){
@@ -1096,13 +1137,18 @@ module.exports = function installAgPulseInlineWidget() {
         @keyframes ag-ic-spin{to{transform:rotate(360deg)}}
         @media(prefers-reduced-motion:reduce){.ic-spin{animation:none}}
       </style><div class="ic-card"><div class="ic-stalled-bar" id="ic-stalled-bar" hidden><span id="ic-stalled-msg"></span><button type="button" class="ic-reinvoke" id="ic-reinvoke-btn">⚡ 重新调起</button></div><div class="ic-list" id="ic-list"></div></div>`);
-      sr.getElementById('ic-reinvoke-btn')?.addEventListener('click',e=>{e.stopPropagation();void onReinvokeClick(sr.getElementById('ic-reinvoke-btn'));});
+      sr.getElementById('ic-reinvoke-btn')?.addEventListener('click',e=>{e.stopPropagation();void onReinvokeClick(sr.getElementById('ic-reinvoke-btn'),{scope:chatHost._agPulseScope||convScope,tp:chatHost._agPulseTp});});
     }
+    chatHost._agPulseScope=convScope;
+    chatHost._agPulseTp=tp;
     const relatives=Array.from(bodyDiv.children).filter(c=>c!==chatHost&&c.classList?.contains('relative'));
     const anchorAfter=relatives[relatives.length-1]||null;
+    const bodyChildren=Array.from(bodyDiv.children);
+    const hostIdx=bodyChildren.indexOf(chatHost);
+    const anchorIdx=anchorAfter?bodyChildren.indexOf(anchorAfter):-1;
     if(anchorAfter){
-      if(anchorAfter.nextSibling!==chatHost)anchorAfter.after(chatHost);
-    }else if(bodyDiv.firstChild!==chatHost){
+      if(hostIdx<0||hostIdx<anchorIdx)anchorAfter.after(chatHost);
+    }else if(hostIdx<0){
       bodyDiv.prepend(chatHost);
     }
     const sr=chatHost.shadowRoot;
@@ -1411,25 +1457,45 @@ module.exports = function installAgPulseInlineWidget() {
     })();
     return refreshRequest;
   }
-  const observer=new MutationObserver(records=>{if(records.some(record=>record.target!==node&&!node?.contains(record.target)&&!record.target.closest?.('.ag-pulse-inline-chat-host')))scheduleLayout();});observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','role','contenteditable']});
+  const isPulseNode=el=>el===node||el?.id===ID||el?.classList?.contains?.('ag-pulse-inline-chat-host')||Boolean(node?.contains?.(el))||Boolean(el?.closest?.('.ag-pulse-inline-chat-host'));
+  const observer=new MutationObserver(records=>{
+    const relevant=records.some(record=>{
+      if(isPulseNode(record.target))return false;
+      if(record.type==='childList'){
+        const nodes=[...record.addedNodes,...record.removedNodes];
+        if(nodes.length&&nodes.every(isPulseNode))return false;
+      }
+      return true;
+    });
+    if(relevant)scheduleLayout();
+  });observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert','data-cascade-id','data-testid','data-tooltip-id','aria-label','role','contenteditable']});
   const onKey=e=>{if(e.key==='Escape')hide();}, onPointer=e=>{if(node&&!e.composedPath().includes(node))hide();};
   const onFocus=e=>{if(!node||!e.composedPath().includes(node))scheduleLayout();};
   document.addEventListener('keydown',onKey);document.addEventListener('pointerdown',onPointer);document.addEventListener('focusin',onFocus);
   window.addEventListener('resize',scheduleLayout);document.addEventListener('scroll',scheduleLayout,true);
   densityMedia.addEventListener('change',stopDensityMotion);
+  const onVisibility=()=>{if(!document.hidden&&!disposed){mount();fit();tick();position();refresh();}};
+  document.addEventListener('visibilitychange',onVisibility);
   const timerId=setInterval(()=>{
+    if(document.hidden){
+      if(Date.now()-lastFetch>10000)refresh();
+      return;
+    }
     mount();fit();tick();position();
     const {subagents:curSub,tasks:curTasks}=countDomRunningIndicators(),curGen=isHostGenerating(curSub);
     const stateFlipped=(curGen!==lastHostGenerating&&curGen!==null)||curSub!==lastDomSubagents||curTasks!==lastDomTasks;
-    if(stateFlipped){syncOptimisticRunningState();refresh(true);return;}
-    const intervalMs=document.hidden?10000:800;
+    if(stateFlipped){
+      if(curGen!==null)lastHostGenerating=curGen;
+      lastDomSubagents=curSub;lastDomTasks=curTasks;
+      syncOptimisticRunningState();refresh(true);return;
+    }
     const curConv=node?.isConnected?conversationId():(visibleCardScopes()[0]?.id||null);
-    if(curConv!==lastConversation||Date.now()-lastFetch>intervalMs)refresh();
+    if(curConv!==lastConversation||Date.now()-lastFetch>800)refresh();
   },600);
   window.__agPulseDispose=()=>{
     disposed=true;requestEpoch++;pending=false;refreshRequest=null;stopDensityMotion();densityFrame=null;densityProbe=null;compactProbe=null;
     clearInterval(timerId);clearTimeout(hoverTimer);clearTimeout(openTimer);if(layoutFrame!==null)cancelAnimationFrame(layoutFrame);observer.disconnect();resizeObserver?.disconnect();themeController?.dispose();preferences.dispose();hostTranslator?.dispose();hide();usageDashboard?.dispose();updateMenu?.dispose();clearInlineChatCards();node?.remove();
-    document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);document.removeEventListener('focusin',onFocus);
+    document.removeEventListener('keydown',onKey);document.removeEventListener('pointerdown',onPointer);document.removeEventListener('focusin',onFocus);document.removeEventListener('visibilitychange',onVisibility);
     document.removeEventListener('scroll',scheduleLayout,true);window.removeEventListener('resize',scheduleLayout);
     densityMedia.removeEventListener('change',stopDensityMotion);
     document.removeEventListener('DOMContentLoaded',mount);node=null;root=null;composer=null;

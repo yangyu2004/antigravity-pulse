@@ -997,3 +997,83 @@ test('null taskProgress or empty new conversation scope clears stale card withou
     assert.equal(Boolean(resp1.stepList.querySelector('.ag-pulse-inline-chat-host')), false, 'Stale card must clear when taskProgress becomes null even without data-cascade-id');
   });
 });
+
+test('single-child agent-response does not ping-pong or recreate inline card across repeated renders', async () => {
+  const convId = '55555555-5555-5555-5555-555555555555';
+  await withMockBrowser(() => createTestDom({ pathname: `/c/${convId}` }), async ({ win, doc, MiniElement, makeComposer }) => {
+    const view = new MiniElement('div', { 'data-testid': 'conversation-view', 'data-cascade-id': convId });
+    // Single native child without data-step-rows or [data-step-list] — previously caused infinite ping-pong between resp and children[1]
+    const resp = new MiniElement('div', { 'data-testid': 'agent-response' });
+    const innerContent = new MiniElement('div', { class: 'prose' });
+    resp.append(innerContent);
+    const comp = makeComposer(true);
+    view.append(resp, comp.box);
+    doc.body.append(view);
+    doc.activeElement = comp.editor;
+
+    win.agPulseHost = {
+      getPreferences: async () => ({ language: 'zh-CN', languageGuideDismissed: true, usageGuideDismissed: true, revision: 1 }),
+      setPreferences: async i => i,
+      report: () => {},
+      getMetrics: async () => ({
+        connection: 'live',
+        groups: [],
+        speed: null,
+        taskProgress: {
+          status: 'running',
+          progressPercent: 50,
+          turnStepIdx: 3,
+          showInlineCard: true,
+          steps: [
+            { id: 1, title: '读取代码', status: 'completed', percent: 100 },
+            { id: 2, title: '执行验证', status: 'running', percent: 50 },
+          ],
+        },
+      }),
+    };
+
+    installWidget();
+    await new Promise(r => setTimeout(r, 30));
+    const card1 = resp.querySelector('.ag-pulse-inline-chat-host');
+    assert.ok(card1, 'Inline card must mount inside single-child agent-response');
+    assert.equal(card1.parentElement, resp);
+
+    // Wait across two polling cycles (2 * 800ms) and assert the exact same card node stays put without jumping into innerContent
+    await new Promise(r => setTimeout(r, 1700));
+    const cards = resp.querySelectorAll('.ag-pulse-inline-chat-host');
+    assert.equal(cards.length, 1);
+    assert.strictEqual(cards[0], card1, 'Inline card must not be destroyed/recreated or bounced across ticks');
+    assert.equal(innerContent.querySelector('.ag-pulse-inline-chat-host'), null);
+  });
+});
+
+test('2.34.0 input-stop-button and localized 停止执行 aria-label both report hostGenerating=true', async () => {
+  const convId = '66666666-6666-6666-6666-666666666666';
+  for (const attrs of [{ 'data-testid': 'input-stop-button' }, { 'aria-label': '停止执行' }]) {
+    const calls = [];
+    await withMockBrowser(() => createTestDom({ pathname: `/c/${convId}` }), async ({ win, doc, MiniElement, makeComposer }) => {
+      const view = new MiniElement('div', { 'data-testid': 'conversation-view', 'data-cascade-id': convId });
+      const comp = makeComposer(true);
+      const stopBtn = new MiniElement('button', attrs);
+      comp.box.append(stopBtn);
+      view.append(comp.box);
+      doc.body.append(view);
+      doc.activeElement = comp.editor;
+
+      win.agPulseHost = {
+        getPreferences: async () => ({ language: 'zh-CN', languageGuideDismissed: true, usageGuideDismissed: true, revision: 1 }),
+        setPreferences: async i => i,
+        report: () => {},
+        getMetrics: async input => {
+          calls.push(input);
+          return { connection: 'live', groups: [], speed: null, taskProgress: null };
+        },
+      };
+
+      installWidget();
+      await new Promise(r => setTimeout(r, 30));
+      assert.ok(calls.length >= 1);
+      assert.equal(calls[0].hostGenerating, true, `Expected hostGenerating=true for ${JSON.stringify(attrs)}`);
+    });
+  }
+});

@@ -6,11 +6,31 @@ const { spawn } = require('child_process');
 
 const eventName = process.argv[2] || 'Unknown';
 const AUTO_UPDATE_INTERVAL_MS = 30 * 60 * 1000;
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_STDIN_BYTES = 512 * 1024;
+const IDLE_STDIN_TIMEOUT_MS = 250;
+const MAX_STDIN_TIMEOUT_MS = 1500;
+const SENSITIVE_VALUE_RE = /\b((?:Bearer|Basic)\s+[^\s'"]+|sk-[A-Za-z0-9_-]{8,}|gh[pous]_[A-Za-z0-9_]{16,}|AIza[0-9A-Za-z_-]{20,}|(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)\s*[=:]\s*(?:(?:Bearer|Basic|Token)\s+)?[^\s'";&]+)/gi;
+
+function cleanChildEnv(env = process.env) {
+  const cleaned = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (/^ANTIGRAVITY_(?:CSRF_TOKEN|LS_ADDRESS|SIDECAR_)/i.test(k)) continue;
+    cleaned[k] = v;
+  }
+  return cleaned;
+}
+
+function resolveStampFile() {
+  const dataRoot = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR
+    ? process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR
+    : path.join(os.homedir(), '.gemini', 'antigravity', 'sidecar_data', 'antigravity-pulse', 'panel', 'data');
+  return path.join(dataRoot, 'updates', 'auto-check-stamp.json');
+}
 
 function maybeSpawnBackgroundAutoUpdate() {
   try {
-    const home = os.homedir();
-    const stampFile = path.join(home, '.gemini', 'antigravity', 'sidecar_data', 'antigravity-pulse', 'panel', 'data', 'updates', 'auto-check-stamp.json');
+    const stampFile = resolveStampFile();
     try {
       const st = fs.statSync(stampFile);
       if (Date.now() - st.mtimeMs < AUTO_UPDATE_INTERVAL_MS) return;
@@ -22,80 +42,135 @@ function maybeSpawnBackgroundAutoUpdate() {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
+      env: cleanChildEnv(),
     });
+    child.on('error', () => {});
     if (typeof child.unref === 'function') child.unref();
   } catch {}
+}
+
+function sanitizeShortText(value, maxLen = 160) {
+  if (typeof value !== 'string') return undefined;
+  const firstLine = value.replace(/\r?\n[\s\S]*/, '').trim();
+  if (!firstLine) return undefined;
+  return firstLine.replace(SENSITIVE_VALUE_RE, '[REDACTED]').slice(0, maxLen);
+}
+
+function sanitizeToolCall(toolCall) {
+  if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) return null;
+  const name = typeof toolCall.name === 'string' ? toolCall.name.slice(0, 80) : null;
+  if (!name) return null;
+  const rawArgs = toolCall.args || toolCall.arguments || toolCall.parameters;
+  const safeArgs = {};
+  if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+    const allowStrings = ['toolSummary', 'Path', 'path', 'Role', 'TypeName', 'Name', 'action', 'query', 'CronExpression', 'TimerCondition', 'TaskId', 'Action'];
+    for (const key of allowStrings) {
+      const cleaned = sanitizeShortText(rawArgs[key], 160);
+      if (cleaned !== undefined) safeArgs[key] = cleaned;
+    }
+    if (typeof rawArgs.CommandLine === 'string') {
+      const cmd = sanitizeShortText(rawArgs.CommandLine, 120);
+      if (cmd !== undefined) safeArgs.CommandLine = cmd;
+    }
+    if (typeof rawArgs.DurationSeconds === 'number' && Number.isFinite(rawArgs.DurationSeconds)) {
+      safeArgs.DurationSeconds = rawArgs.DurationSeconds;
+    }
+  }
+  return Object.keys(safeArgs).length ? { name, args: safeArgs } : { name };
 }
 
 function readStdin() {
   return new Promise((resolve) => {
     let data = '';
+    let byteCount = 0;
+    let truncated = false;
     let settled = false;
     const done = (val) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
+      clearTimeout(maxTimer);
       process.stdin.removeAllListeners();
       process.stdin.pause();
       resolve(val);
     };
-    const timer = setTimeout(() => {
+    const finish = () => {
+      if (truncated || !data) {
+        done({});
+        return;
+      }
       try {
-        done(data ? JSON.parse(data) : {});
+        done(JSON.parse(data));
       } catch {
         done({});
       }
-    }, 150);
-    if (typeof timer.unref === 'function') timer.unref();
+    };
+    let idleTimer = setTimeout(finish, IDLE_STDIN_TIMEOUT_MS);
+    const maxTimer = setTimeout(finish, MAX_STDIN_TIMEOUT_MS);
+    if (typeof idleTimer.unref === 'function') idleTimer.unref();
+    if (typeof maxTimer.unref === 'function') maxTimer.unref();
 
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
-    process.stdin.on('end', () => {
-      try {
-        done(data ? JSON.parse(data) : {});
-      } catch {
-        done({});
+    process.stdin.on('data', chunk => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(finish, IDLE_STDIN_TIMEOUT_MS);
+      if (typeof idleTimer.unref === 'function') idleTimer.unref();
+      byteCount += Buffer.byteLength(chunk, 'utf8');
+      if (byteCount > MAX_STDIN_BYTES) {
+        truncated = true;
+        return;
       }
+      data += chunk;
     });
+    process.stdin.on('end', finish);
     process.stdin.on('error', () => done({}));
   });
 }
 
 async function main() {
   const payload = await readStdin();
-  const conversationId = payload.conversationId;
+  const rawConversationId = payload && typeof payload === 'object' ? payload.conversationId : null;
+  const conversationId = typeof rawConversationId === 'string' && GUID_RE.test(rawConversationId)
+    ? rawConversationId.toLowerCase()
+    : null;
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
   if (conversationId) {
+    let tmpFile = null;
     try {
       const brainRoot = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-      const scratchDir = path.join(brainRoot, String(conversationId).toLowerCase(), 'scratch');
+      const scratchDir = path.join(brainRoot, conversationId, 'scratch');
       fs.mkdirSync(scratchDir, { recursive: true });
 
       const stateFile = path.join(scratchDir, 'lifecycle_state.json');
-      const tmpFile = `${stateFile}.tmp.${process.pid}`;
+      tmpFile = `${stateFile}.tmp.${process.pid}.${nowMs}`;
       const state = {
         event: eventName,
         timestamp: nowIso,
         timestampMs: nowMs,
-        conversationId: String(conversationId).toLowerCase(),
+        conversationId,
         stepIdx: typeof payload.stepIdx === 'number' ? payload.stepIdx : null,
         invocationNum: typeof payload.invocationNum === 'number' ? payload.invocationNum : null,
         fullyIdle: typeof payload.fullyIdle === 'boolean' ? payload.fullyIdle : null,
-        toolCall: payload.toolCall || null,
-        error: payload.error || null,
-        terminationReason: payload.terminationReason || null,
-        transcriptPath: payload.transcriptPath || null,
-        lastUserInput: typeof payload.lastUserInput === 'string' ? payload.lastUserInput.slice(0, 200) : null
+        toolCall: sanitizeToolCall(payload.toolCall),
+        error: sanitizeShortText(typeof payload.error === 'string' ? payload.error : payload.error?.message, 240) || null,
+        terminationReason: sanitizeShortText(payload.terminationReason, 120) || null,
+        transcriptPath: typeof payload.transcriptPath === 'string' ? payload.transcriptPath.slice(0, 512) : null,
+        lastUserInput: sanitizeShortText(payload.lastUserInput, 200) || null,
       };
 
-      fs.writeFileSync(tmpFile, JSON.stringify(state), 'utf8');
+      fs.writeFileSync(tmpFile, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmpFile, stateFile);
-    } catch {}
+      tmpFile = null;
+    } catch {
+      if (tmpFile) {
+        try { fs.unlinkSync(tmpFile); } catch {}
+      }
+    }
   }
 
-  if (eventName === 'Stop' && payload.fullyIdle !== false) {
+  if (eventName === 'Stop' && payload && payload.fullyIdle !== false) {
     maybeSpawnBackgroundAutoUpdate();
   }
 
@@ -106,10 +181,14 @@ async function main() {
   }
 }
 
-main().catch(() => {
-  if (eventName === 'PreToolUse' || eventName === 'Stop') {
-    process.stdout.write(JSON.stringify({ decision: 'allow' }));
-  } else {
-    process.stdout.write(JSON.stringify({}));
-  }
-});
+if (require.main === module) {
+  main().catch(() => {
+    if (eventName === 'PreToolUse' || eventName === 'Stop') {
+      process.stdout.write(JSON.stringify({ decision: 'allow' }));
+    } else {
+      process.stdout.write(JSON.stringify({}));
+    }
+  });
+}
+
+module.exports = { GUID_RE, sanitizeToolCall, sanitizeShortText, cleanChildEnv };

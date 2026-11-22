@@ -71,7 +71,7 @@ export function trajectoryMetrics(response) {
     measuredRequests:0, inputRequests:0, outputRequests:0, missingInputRequests:0, missingOutputRequests:0,
     uncachedRequests:0, cachedRequests:0, cacheWriteRequests:0 };
   for (const [index, generator] of generators.entries()) {
-    const chat = generator.chatModel;
+    const chat = generator?.chatModel;
     if (!chat?.usage) continue;
     const usage = chat.usage;
     // IDE executionId identifies a planner run/turn, not an individual model
@@ -155,9 +155,9 @@ export function trajectoryMetrics(response) {
   const sampledTokens = accepted.reduce((sum, s) => sum + s.responseTokens, 0);
   const basisSamples = accepted.length ? accepted : samples;
   const tools = steps.filter(s => /SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL/i.test(String(s.type || '')) || s.metadata?.toolCall);
-  const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata.startedAt || s.metadata.createdAt), Date.parse(s.metadata.completedAt)]));
+  const toolSeconds = unionSeconds(tools.map(s => [Date.parse(s.metadata?.startedAt || s.metadata?.createdAt), Date.parse(s.metadata?.completedAt)]));
   const latest = samples.at(-1) || null;
-  const lastChat = generators.findLast(g => g.chatModel)?.chatModel;
+  const lastChat = generators.findLast(g => g?.chatModel)?.chatModel;
   const chatModelLabel = chat => chat?.modelDisplayName || chat?.responseModel || String(chat?.model || chat?.usage?.model || '');
   const sameModelAs = (a, b) => {
     if (!a || !b) return false;
@@ -188,7 +188,12 @@ export function trajectoryMetrics(response) {
   const lastCkptIdx = ckptIndices.length ? ckptIndices.at(-1) : -1;
   const ctxStepIdx = ctxGen ? Math.max(-1, ...(ctxGen.stepIndices || []).filter(i => Number.isInteger(i) && i >= 0)) : -1;
   let resolvedContext = null;
-  if (lastCkptIdx >= 0 && lastCkptIdx > ctxStepIdx && ctxGen) {
+  const ckptAfterCtx = lastCkptIdx >= 0 && ctxGen && (
+    ctxStepIdx >= 0
+      ? lastCkptIdx > ctxStepIdx
+      : (Date.parse(steps[lastCkptIdx]?.metadata?.completedAt || steps[lastCkptIdx]?.metadata?.createdAt || '') > Date.parse(ctxGen.chatModel?.chatStartMetadata?.createdAt || ''))
+  );
+  if (ckptAfterCtx) {
     const ckptStep = steps[lastCkptIdx];
     const summaryTokens = checkpointSummaryTokens(ckptStep);
     const preCompactUsed = tokenCount(ctxGen.chatModel?.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed);

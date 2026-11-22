@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_INTERVAL_SEC = 1800  # 30 minutes
+PULSE_PANEL_RE = re.compile(r'(?:^|[\\/])antigravity-pulse[\\/]sidecars[\\/]panel(?:\b|[\\/]|$)')
 
 
 def load_paths(home=None):
@@ -101,14 +103,14 @@ def _is_panel_sidecar_proc(pid: int, uid: int) -> bool:
                 if proc_uid != uid:
                     return False
                 if 'main.mjs' in proc_args:
-                    if 'antigravity-pulse' in proc_args:
+                    if PULSE_PANEL_RE.search(proc_args):
                         return True
                     try:
                         cwd_res = subprocess.run(
                             ['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
                             capture_output=True, text=True, timeout=5
                         )
-                        if cwd_res.returncode == 0 and 'antigravity-pulse' in cwd_res.stdout:
+                        if cwd_res.returncode == 0 and PULSE_PANEL_RE.search(cwd_res.stdout):
                             return True
                     except Exception:
                         pass
@@ -122,11 +124,11 @@ def _is_panel_sidecar_proc(pid: int, uid: int) -> bool:
                 return False
             cmdline = (proc_dir / 'cmdline').read_bytes().replace(b'\x00', b' ').decode('utf-8', errors='ignore')
             if 'main.mjs' in cmdline:
-                if 'antigravity-pulse' in cmdline:
+                if PULSE_PANEL_RE.search(cmdline):
                     return True
                 try:
                     target = os.readlink(str(proc_dir / 'cwd'))
-                    if 'antigravity-pulse' in target:
+                    if PULSE_PANEL_RE.search(target):
                         return True
                 except OSError:
                     pass
@@ -233,6 +235,12 @@ def run_auto_update(home: Path | None = None, target: Path | None = None,
 
     if not force:
         stamp = read_json(stamp_file, {})
+        if stamp.get('pendingReload'):
+            reloaded = reload_idle_sidecar(home_dir)
+            if reloaded:
+                stamp['pendingReload'] = False
+                stamp['reloaded'] = True
+                write_json_atomic(stamp_file, stamp)
         last_checked = stamp.get('lastCheckedAt', 0)
         if isinstance(last_checked, (int, float)) and 0 < (now - last_checked) < interval_sec:
             return {'status': 'throttled', 'lastCheckedAt': last_checked}
@@ -276,6 +284,7 @@ def run_auto_update(home: Path | None = None, target: Path | None = None,
             'fromVersion': plan.get('currentVersion'),
             'version': applied.get('version'),
             'reloaded': reloaded,
+            'pendingReload': not reloaded,
         })
         return {'status': 'updated', 'version': applied.get('version'), 'reloaded': reloaded}
     except Exception as error:

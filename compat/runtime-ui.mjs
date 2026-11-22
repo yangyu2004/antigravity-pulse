@@ -1,9 +1,9 @@
 // The plugin owns this adapter. App upgrades never need to preserve app.asar edits.
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { platformPaths } from './platform.mjs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -169,8 +169,22 @@ export class RuntimeUi {
     this.binding=owner?BINDING+'_'+owner.replaceAll('-',''):BINDING;
   }
   async setHealth(state, message) {
-    this.health = { state, mode: 'runtime', message, windows: this.sessions.size, checkedAt: new Date().toISOString() };
-    if (this.dataDir&&await this.owns()) { try { await mkdir(this.dataDir, { recursive: true }); await writeFile(join(this.dataDir, 'integration-state.json'), JSON.stringify(this.health)); } catch { /* Read-only state reporting must not crash collection. */ } }
+    const now = Date.now();
+    const changed = this.health.state !== state || this.health.message !== message || this.health.windows !== this.sessions.size;
+    this.health = { state, mode: 'runtime', message, windows: this.sessions.size, checkedAt: new Date(now).toISOString() };
+    if (this.dataDir && (changed || now - (this._lastHealthWriteAt || 0) >= 30000) && await this.owns()) {
+      const target = join(this.dataDir, 'integration-state.json');
+      const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await mkdir(this.dataDir, { recursive: true });
+        await writeFile(tmp, JSON.stringify(this.health), 'utf8');
+        await rename(tmp, target);
+        this._lastHealthWriteAt = now;
+      } catch {
+        await unlink(tmp).catch(() => {});
+        /* Read-only state reporting must not crash collection. */
+      }
+    }
   }
   async event(connection, message) {
     if(this.stopping||!await this.owns())return;
@@ -212,7 +226,12 @@ export class RuntimeUi {
         result=Object.keys(value).length?await this.preferences.set(value):await this.preferences.get();
       }
       else if (input.type === 'task-action' && this.taskAction) {
-        result = await this.taskAction(input.input);
+        if (!await this.enabled()) throw Error('Plugin disabled');
+        const value = input.input;
+        if (!value || typeof value !== 'object' || Array.isArray(value) || value.action !== 'reinvoke' || typeof value.conversationId !== 'string' || !GUID.test(value.conversationId)) {
+          throw new Error('Invalid task action');
+        }
+        result = await this.taskAction({ action: 'reinvoke', conversationId: value.conversationId.toLowerCase() });
       }
       else if (input.type === 'diagnostic' && ['boot', 'mounted', 'mount-error'].includes(input.input?.stage)) {
         if (input.input.stage === 'mounted' && input.input.editorFound && input.input.composerFound) connection.mounted = true;
@@ -270,9 +289,24 @@ export class RuntimeUi {
       for (const [url, connection] of this.sessions) if (!active.has(url) || connection.closed) { connection.close(); this.sessions.delete(url); }
       for (const target of targets) {
         const connection = this.sessions.get(target.webSocketDebuggerUrl);
-        if (connection && connection.origin !== this.targetOrigin(target)) { connection.close(); this.sessions.delete(target.webSocketDebuggerUrl); }
+        if (connection && connection.origin !== this.targetOrigin(target)) {
+          try { if (connection.script) await connection.command('Page.removeScriptToEvaluateOnNewDocument', { identifier: connection.script }); } catch {}
+          try { if (this.owner) await connection.command('Runtime.removeBinding', { name: this.binding }); } catch {}
+          connection.close();
+          this.sessions.delete(target.webSocketDebuggerUrl);
+        }
       }
-      for (const target of targets) if (!this.sessions.has(target.webSocketDebuggerUrl)) this.sessions.set(target.webSocketDebuggerUrl, await this.attach(target));
+      let lastAttachError = null;
+      for (const target of targets) {
+        if (!this.sessions.has(target.webSocketDebuggerUrl)) {
+          try {
+            this.sessions.set(target.webSocketDebuggerUrl, await this.attach(target));
+          } catch (attachErr) {
+            lastAttachError = attachErr;
+          }
+        }
+      }
+      if (lastAttachError && !this.sessions.size) throw lastAttachError;
       if (this.stopping||!await this.owns()) { await this.detachAll(); return; }
       for (const [url, connection] of this.sessions) {
         try {

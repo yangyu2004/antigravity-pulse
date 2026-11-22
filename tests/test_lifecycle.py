@@ -283,4 +283,38 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn('Launcher (2.33.0+ CDP debug port):', out3.getvalue())
         self.assertEqual(err3.getvalue(), '')
 
+    def test_set_enabled_respects_lock_and_launcher_escaping_and_symlinks(self):
+        lock_spec = importlib.util.spec_from_file_location('test_update_lock2', ROOT / 'compat/update-lock.py')
+        locks = importlib.util.module_from_spec(lock_spec)
+        lock_spec.loader.exec_module(locks)
+        manager.install(panel_only=True)
+        with locks.lifecycle_lock(self.plugin):
+            with self.assertRaises(FileExistsError):
+                manager.set_enabled(False)
+
+        # Linux .desktop escaping (% -> %%)
+        linux_dir = self.home / 'opt' / '100%app'
+        linux_exe = linux_dir / 'antigravity'
+        linux_asar = linux_dir / 'resources' / 'app.asar'
+        linux_asar.parent.mkdir(parents=True)
+        linux_exe.write_bytes(b'bin')
+        linux_asar.write_bytes(b'asar')
+        with patch.multiple(manager, HOME=self.home, APP=linux_asar), patch('sys.platform', 'linux'):
+            desktop = manager.install_launcher(quiet=True)
+            text = desktop.read_text(encoding='utf-8')
+            self.assertIn('100%%app/antigravity', text)
+
+        # macOS symlinked launcher must be rejected
+        if os.name != 'nt':
+            apps = self.home / 'Applications'
+            apps.mkdir(parents=True, exist_ok=True)
+            bad_link = apps / 'Antigravity (Pulse).app'
+            bad_link.symlink_to(self.home)
+            mac_asar = self.home / 'Antigravity.app' / 'Contents' / 'Resources' / 'app.asar'
+            mac_asar.parent.mkdir(parents=True)
+            mac_asar.write_bytes(b'asar')
+            with patch.multiple(manager, HOME=self.home, APP=mac_asar), patch('sys.platform', 'darwin'):
+                with self.assertRaisesRegex(RuntimeError, 'symlink'):
+                    manager.install_launcher(quiet=True)
+
 if __name__ == '__main__': unittest.main()

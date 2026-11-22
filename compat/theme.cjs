@@ -33,13 +33,22 @@ module.exports = function createAgPulseTheme() {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const canvas = document.createElement('canvas'); canvas.width=canvas.height=1;
     const context = canvas.getContext('2d', { willReadFrequently:true });
-    let stopped=false,hostTheme={};
+    let stopped=false,hostTheme={},lastThemeKey='';
+    const rgbCache=new Map();
     function rgb(color) {
-      if (!color || !context || !CSS.supports('color',color)) return null;
+      if (!color || !context) return null;
+      if (rgbCache.has(color)) return rgbCache.get(color);
+      if (!CSS.supports('color',color)) {
+        if (rgbCache.size > 256) rgbCache.clear();
+        rgbCache.set(color, null);
+        return null;
+      }
       context.clearRect(0,0,1,1); context.fillStyle='transparent';context.fillStyle=color; context.fillRect(0,0,1,1);
       const [r,g,b,a]=context.getImageData(0,0,1,1).data;
-      if (a<250) return null; // Transparent surfaces do not define a theme.
-      return [r,g,b];
+      const result = a < 250 ? null : [r,g,b]; // Transparent surfaces do not define a theme.
+      if (rgbCache.size > 256) rgbCache.clear();
+      rgbCache.set(color, result);
+      return result;
     }
     function fromColor(color) {
       const values=rgb(color);return values ? .2126*values[0]+.7152*values[1]+.0722*values[2]>=145?'light':'dark' : null;
@@ -132,6 +141,15 @@ module.exports = function createAgPulseTheme() {
     function update() {
       if (stopped) return;
       const theme=resolve();
+      const rawEls=embedded?[target.parentElement,document.body,document.documentElement]:[document.documentElement,document.body];
+      const sigParts=[theme,JSON.stringify(hostTheme)];
+      for(const el of rawEls.filter(Boolean)){
+        const s=getComputedStyle(el);
+        sigParts.push(s.backgroundColor,s.getPropertyValue('--background'),s.getPropertyValue('--color-background'),s.getPropertyValue('--popover'),s.getPropertyValue('--card'),s.getPropertyValue('--color-card'),s.getPropertyValue('--foreground'),s.getPropertyValue('--color-foreground'),s.getPropertyValue('--primary'),s.getPropertyValue('--color-primary'));
+      }
+      const nextKey=sigParts.join('|');
+      if (nextKey===lastThemeKey && target.dataset.pulseTheme===theme) return theme;
+      lastThemeKey=nextKey;
       if (target.dataset.pulseTheme!==theme) target.dataset.pulseTheme=theme;
       const values=surfaceColors(theme);
       const surfaces=[values.card||palettes[theme].card,values.background||palettes[theme].background,values.control||palettes[theme].control].map(rgb);

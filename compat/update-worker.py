@@ -386,6 +386,7 @@ def stage_archive(archive, stage, expected_version):
         if len(entries) > 8192 or sum(e.file_size for e in entries) > MAX_EXPANDED:
             raise ValueError('Expanded archive exceeds budget')
         seen = set()
+        actual_expanded = 0
         for entry in entries:
             name = entry.orig_filename
             parts = PurePosixPath(name).parts
@@ -414,7 +415,14 @@ def stage_archive(archive, stage, expected_version):
             target.parent.mkdir(parents=True, exist_ok=True)
             check_file_targets(stage, [PurePosixPath(*relative).as_posix()])
             with bundle.open(entry) as incoming, target.open('wb') as outgoing:
-                shutil.copyfileobj(incoming, outgoing, length=65536)
+                while True:
+                    chunk = incoming.read(65536)
+                    if not chunk:
+                        break
+                    actual_expanded += len(chunk)
+                    if actual_expanded > MAX_EXPANDED:
+                        raise ValueError('Expanded archive exceeds budget')
+                    outgoing.write(chunk)
     manifest = json.loads((stage / 'plugin.json').read_text(encoding='utf-8-sig'))
     if manifest.get('name') != 'antigravity-pulse' or manifest.get('version') != expected_version:
         raise ValueError('Package manifest mismatch')

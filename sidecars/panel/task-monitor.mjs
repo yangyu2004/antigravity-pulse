@@ -1,15 +1,29 @@
-import { readdir, stat, open, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readdir, stat, open, readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const THINK_STALL_SEC = 180; // 高推理模型正常思考可达 60~120s，超过 180s 无任何响应才判疑似卡死
 const TOOL_STALL_SEC = 90;
 const MAX_INITIAL_READ_BYTES = 262144;
+const MAX_DELTA_READ_BYTES = 1024 * 1024;
+const MAX_CACHED_CONVERSATIONS = 64;
+const MAX_TURN_TOOL_STEPS = 32;
+const VALID_STEP_STATUSES = new Set(['pending', 'running', 'completed', 'stalled']);
 // swarm_wait / wait_for_message 与后台长耗时任务均可能等待数分钟至数十分钟；超过 30 分钟仍无进度再提示
 const BOARD_WAIT_STALL_SEC = 1800;
 const BG_TASK_MAX_AGE_MS = 12 * 3600 * 1000;
 const BOARD_WAIT_TOOLS = new Set(['swarm_wait', 'wait_for_message']);
+
+function trimMap(map, limit = MAX_CACHED_CONVERSATIONS) {
+  while (map.size > limit) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
 
 export class TaskMonitor {
   constructor(options = {}) {
@@ -17,6 +31,7 @@ export class TaskMonitor {
     this.transcriptCache = new Map();
     this.pendingTurnAnchors = new Map();
     this.lastTurnFinished = new Map();
+    this.inFlightReads = new Map();
   }
 
   async snapshot(conversationId, { hostGenerating = null, domRunningSubagents = 0, domRunningTasks = 0, cascadeState = null } = {}) {
@@ -119,6 +134,7 @@ export class TaskMonitor {
       } else {
         pendingAnchorMs = newHookAfterEnd && lifecycleMs > (tState.turnEndMs || 0) + 150 ? lifecycleMs : now;
         this.pendingTurnAnchors.set(id, { key: anchorKey, startedAtMs: pendingAnchorMs });
+        trimMap(this.pendingTurnAnchors);
       }
     } else if (existingAnchor) {
       this.pendingTurnAnchors.delete(id);
@@ -197,6 +213,7 @@ export class TaskMonitor {
     );
     const turnFinished = !inActiveTurn;
     this.lastTurnFinished.set(id, turnFinished);
+    trimMap(this.lastTurnFinished);
 
     // 5. 仅扫描属于本轮对话（mtime >= effectiveTurnStartMs）的后台任务日志，彻底屏蔽历史旧日志
     let latestTask = null;
@@ -250,8 +267,10 @@ export class TaskMonitor {
     let headline = '待命';
 
     if (inActiveTurn) {
+      const maxTimerSec = activeBgTasks.reduce((m, t) => (t.isTimer && t.durationMs > 0 ? Math.max(m, Math.ceil(t.durationMs / 1000) + 60) : m), 0);
+      const waitThreshold = Math.max(BOARD_WAIT_STALL_SEC, maxTimerSec);
       const threshold = (waitingOnBoard || mainWaitingOnBgTasks)
-        ? BOARD_WAIT_STALL_SEC
+        ? waitThreshold
         : (effectiveHookEvent === 'PreToolUse' && !mainWaitingOnSubagents) ? TOOL_STALL_SEC : THINK_STALL_SEC;
       const hasSubagentTelemetry = subagentActivityMs > 0 || (cascadeState?.runningSubagentIds?.length || 0) > 0;
       const canMeasureStall = (!mainWaitingOnSubagents || hasSubagentTelemetry) && (!mainWaitingOnBgTasks || Boolean(latestTask) || activeBgTaskMs > 0);
@@ -322,13 +341,16 @@ export class TaskMonitor {
     let hasRealSteps = false;
 
     if (filePlan?.steps?.length >= 2) {
-      baseSteps = filePlan.steps.slice(0, 8).map((s, i) => ({
-        id: s.id || i + 1,
-        title: this.cleanStepTitle(s.title) || `步骤 ${i + 1}`,
-        status: turnFinished ? 'completed' : (s.status || 'pending'),
-        percent: turnFinished || s.status === 'completed' ? 100 : (s.status === 'running' ? 50 : 0),
-        explicit: true
-      }));
+      baseSteps = filePlan.steps.slice(0, 8).map((s, i) => {
+        const rawStatus = VALID_STEP_STATUSES.has(s.status) ? s.status : 'pending';
+        return {
+          id: s.id || i + 1,
+          title: this.cleanStepTitle(s.title) || `步骤 ${i + 1}`,
+          status: turnFinished ? 'completed' : rawStatus,
+          percent: turnFinished || rawStatus === 'completed' ? 100 : (rawStatus === 'running' ? 50 : 0),
+          explicit: true
+        };
+      });
       hasRealSteps = true;
     } else if (activeTranscriptSteps.length >= 2) {
       hasRealSteps = true;
@@ -703,14 +725,29 @@ export class TaskMonitor {
   }
 
   async readTranscriptIncremental(conversationId, transcriptPath, now) {
+    const prev = this.inFlightReads.get(conversationId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(() => this._readTranscriptIncrementalLocked(conversationId, transcriptPath, now));
+    this.inFlightReads.set(conversationId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.inFlightReads.get(conversationId) === run) {
+        this.inFlightReads.delete(conversationId);
+      }
+    }
+  }
+
+  async _readTranscriptIncrementalLocked(conversationId, transcriptPath, now) {
     let cache = this.transcriptCache.get(conversationId);
     if (!cache) {
       cache = {
         offset: 0,
         lastSize: 0,
         lastGrowthMs: 0,
+        lastStepTs: 0,
         firstSeenStepMs: 0,
         remainder: '',
+        decoder: new StringDecoder('utf8'),
         steps: [],
         turnToolSteps: [],
         planStepIdx: -1,
@@ -733,7 +770,11 @@ export class TaskMonitor {
       const st = await stat(transcriptPath);
       if (st.size < cache.offset) {
         cache.offset = 0;
+        cache.lastSize = 0;
+        cache.lastGrowthMs = 0;
+        cache.lastStepTs = 0;
         cache.remainder = '';
+        cache.decoder = new StringDecoder('utf8');
         cache.steps = [];
         cache.turnToolSteps = [];
         cache.planStepIdx = -1;
@@ -749,27 +790,38 @@ export class TaskMonitor {
       }
 
       if (st.size === cache.offset) {
+        this.transcriptCache.delete(conversationId);
         this.transcriptCache.set(conversationId, cache);
+        trimMap(this.transcriptCache);
         return cache;
       }
 
       let skipFirstLine = false;
       if (cache.offset === 0 && st.size > MAX_INITIAL_READ_BYTES) {
         cache.offset = st.size - MAX_INITIAL_READ_BYTES;
+        cache.decoder = new StringDecoder('utf8');
+        cache.remainder = '';
+        skipFirstLine = true;
+      } else if (st.size - cache.offset > MAX_DELTA_READ_BYTES) {
+        cache.offset = st.size - MAX_DELTA_READ_BYTES;
+        cache.decoder = new StringDecoder('utf8');
+        cache.remainder = '';
         skipFirstLine = true;
       }
 
       const readLength = st.size - cache.offset;
       const fh = await open(transcriptPath, 'r');
       const buffer = Buffer.alloc(readLength);
+      let bytesRead = 0;
       try {
-        await fh.read(buffer, 0, readLength, cache.offset);
+        ({ bytesRead } = await fh.read(buffer, 0, readLength, cache.offset));
       } finally {
         await fh.close();
       }
-      cache.offset = st.size;
+      cache.offset += bytesRead;
 
-      const chunk = cache.remainder + buffer.toString('utf8');
+      const decoded = bytesRead > 0 ? cache.decoder.write(buffer.subarray(0, bytesRead)) : '';
+      const chunk = cache.remainder + decoded;
       const parts = chunk.split('\n');
       cache.remainder = parts.pop() || '';
       if (skipFirstLine && parts.length > 0) parts.shift();
@@ -788,6 +840,10 @@ export class TaskMonitor {
         if (stepTs > 0 && (!cache.firstSeenStepMs || stepTs < cache.firstSeenStepMs)) {
           cache.firstSeenStepMs = stepTs;
         }
+        const prevSeenStepTs = cache.lastStepTs || 0;
+        if (stepTs > 0 && stepTs > cache.lastStepTs) {
+          cache.lastStepTs = stepTs;
+        }
 
         if (step.type === 'ERROR_MESSAGE') {
           cache.lastErrorMs = stepTs || now;
@@ -798,7 +854,7 @@ export class TaskMonitor {
           if (stepIdx !== cache.turnStepIdx) {
             const hasPrevTurn = cache.turnStepIdx >= 0;
             if (cache.turnEndMs > 0) cache.prevTurnEndMs = cache.turnEndMs;
-            else if (hasPrevTurn && cache.lastGrowthMs > 0 && (!stepTs || stepTs < cache.lastGrowthMs)) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, cache.lastGrowthMs);
+            else if (hasPrevTurn && prevSeenStepTs > 0 && (!stepTs || stepTs < prevSeenStepTs)) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, prevSeenStepTs);
             else if (hasPrevTurn && stepTs > 0 && cache.turnStartMs > 0) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, stepTs - 200);
             cache.turnStepIdx = stepIdx;
             cache.turnStartMs = stepTs > 0 ? Math.max(stepTs, hasPrevTurn ? (cache.prevTurnEndMs || 0) : 0) : now;
@@ -806,6 +862,7 @@ export class TaskMonitor {
             cache.lastErrorMs = 0;
             cache.lastStepFinished = false;
             cache.waitingOnBoard = false;
+            cache.pendingTimerConditions = [];
             cache.steps = [];
             cache.turnToolSteps = [];
             cache.planStepIdx = -1;
@@ -844,6 +901,12 @@ export class TaskMonitor {
                   if (taskObj.timerCondition && (taskObj.timerCondition === fid || fid.endsWith(`/${taskObj.timerCondition}`) || taskObj.timerCondition.endsWith(`/${fid}`))) {
                     cache.runningBgTasks.delete(tid);
                   }
+                }
+              }
+              // 任何非空消息到达时取消 TimerCondition === 'any' 的定时器
+              for (const [tid, taskObj] of Array.from(cache.runningBgTasks.entries())) {
+                if (taskObj.timerCondition === 'any') {
+                  cache.runningBgTasks.delete(tid);
                 }
               }
             }
@@ -904,8 +967,9 @@ export class TaskMonitor {
           for (const tc of toolCalls) {
             if (tc?.name === 'schedule' && tc?.args) {
               const cond = this.unwrapArg(tc.args.TimerCondition);
-              if (cond && cond !== 'never' && cond !== 'any') {
-                cache.pendingTimerConditions.push(cond);
+              cache.pendingTimerConditions.push(cond && cond !== 'never' ? cond : null);
+              if (cache.pendingTimerConditions.length > 32) {
+                cache.pendingTimerConditions.splice(0, cache.pendingTimerConditions.length - 32);
               }
             }
             if (tc?.name === 'manage_task' && tc?.args?.Action && /kill/i.test(this.unwrapArg(tc.args.Action)) && tc?.args?.TaskId) {
@@ -941,6 +1005,9 @@ export class TaskMonitor {
               }
               if (prev !== label) {
                 cache.turnToolSteps.push(label);
+                if (cache.turnToolSteps.length > MAX_TURN_TOOL_STEPS) {
+                  cache.turnToolSteps.splice(0, cache.turnToolSteps.length - MAX_TURN_TOOL_STEPS);
+                }
               }
             }
           }
@@ -968,7 +1035,9 @@ export class TaskMonitor {
         }
       }
 
+      this.transcriptCache.delete(conversationId);
       this.transcriptCache.set(conversationId, cache);
+      trimMap(this.transcriptCache);
     } catch {}
 
     return cache;
@@ -1080,12 +1149,16 @@ export class TaskMonitor {
   }
 
   async reinvoke(conversationId) {
-    if (!conversationId) return { ok: false, error: 'No conversation ID' };
+    if (typeof conversationId !== 'string' || !GUID.test(conversationId)) {
+      return { ok: false, error: 'Invalid conversation ID' };
+    }
+    let tmpFile = null;
     try {
       const id = conversationId.toLowerCase();
       const scratch = join(this.brainRoot, id, 'scratch');
       await mkdir(scratch, { recursive: true });
       const stateFile = join(scratch, 'lifecycle_state.json');
+      tmpFile = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
       const nowMs = Date.now();
       const state = {
         event: 'PreInvocation',
@@ -1094,10 +1167,13 @@ export class TaskMonitor {
         conversationId: id,
         reinvoked: true
       };
-      await writeFile(stateFile, JSON.stringify(state), 'utf8');
+      await writeFile(tmpFile, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
+      await rename(tmpFile, stateFile);
+      tmpFile = null;
       return { ok: true, reinvokedAt: state.timestamp };
-    } catch (e) {
-      return { ok: false, error: e.message };
+    } catch {
+      if (tmpFile) await unlink(tmpFile).catch(() => {});
+      return { ok: false, error: 'Reinvoke state write failed' };
     }
   }
 }

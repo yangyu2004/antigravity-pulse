@@ -31,7 +31,7 @@ const usage=new DesktopUsage(store,undefined,{host:'app',owns});
 store.onTrajectory=async(scope,id,raw)=>{if(!ownership||await ownership.isOwner())await usage.ingest(scope,id,raw);};
 const preferences=new PreferencesStore();
 const taskMonitor=new TaskMonitor();
-const titleRenamer=new TitleRenamer({client:store.client,dataDir:paths.data});
+const titleRenamer=new TitleRenamer({client:store.client,dataDir:paths.data,owns});
 const updater=new AppUpdater({pluginDir:join(HERE,'..','..'),dataDir:paths.data});
 let activeTurnAt=0;
 const GUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -105,9 +105,14 @@ const integration = new RuntimeUi({
   preferences,
   updater,
   taskAction: async input => {
-    if (!input || typeof input !== 'object') return { ok: false };
-    if (input.action === 'reinvoke') return await taskMonitor.reinvoke(input.conversationId);
-    return { ok: false };
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'Invalid task action' };
+    if (input.action === 'reinvoke') {
+      if (typeof input.conversationId !== 'string' || !GUID_RE.test(input.conversationId)) {
+        return { ok: false, error: 'Invalid conversation ID' };
+      }
+      return await taskMonitor.reinvoke(input.conversationId.toLowerCase());
+    }
+    return { ok: false, error: 'Unsupported action' };
   },
   owner:ownership?.token,owns:()=>ownership?ownership.isOwner():true,
   source: makeRendererSource(readFileSync(join(HERE,'..','..','compat','i18n.cjs'),'utf8'),readFileSync(join(HERE,'..','..','compat','inline-widget.cjs'),'utf8'),readFileSync(join(HERE,'..','..','compat','theme.cjs'),'utf8'),ownership?.token,ownership?.startedAt,updateSource()+usageSource()+hostI18nSource()),
@@ -130,7 +135,10 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   app.api('/api/preferences',async data=>{try{return await preferences.set(data);}catch{return new Response(JSON.stringify({error:'Language preference could not be saved'}),{status:400,contentType:'application/json'});}},'POST');
   app.run();
   integration.start();
+  let shuttingDown = false;
   const shutdown=async()=>{
+    if (shuttingDown) return;
+    shuttingDown = true;
     updater.stopAutoUpdate?.();
     usage.dispose();store.dispose();
     const exitTimer=setTimeout(()=>process.exit(0),2000);exitTimer.unref();
@@ -150,8 +158,11 @@ if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
   const port = Number(process.env.AG_PULSE_PORT || 17891);
   const server = createServer(async (req, res) => {
     const host = req.headers.host || '';
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) { res.writeHead(403); res.end(); return; }
-    const url = new URL(req.url, `http://${host}`);
+    let url;
+    try { url = new URL(req.url || '/', `http://${host}`); }
+    catch { res.writeHead(400); res.end(); return; }
     if (url.pathname === '/api/preferences') {
       const sameOrigin=req.headers.origin===`http://${host}`;
       if(req.headers.origin&&!sameOrigin){res.writeHead(403);res.end();return;}

@@ -42,7 +42,7 @@ export class SidecarOwner {
         // lock is allowed time to finish; a live process is never evicted.
         try{
           let record;try{record=JSON.parse(readFileSync(lock,'utf8'));}catch{}
-          if(record?.pid?!alive(record.pid):Date.now()-statSync(lock).mtimeMs>10000){unlinkSync(lock);continue;}
+          if(record?.pid?!this.isAlive(record.pid):Date.now()-statSync(lock).mtimeMs>10000){unlinkSync(lock);continue;}
         }catch(error){if(error.code==='ENOENT')continue;throw error;}
         if(Date.now()>deadline)throw new Error('Sidecar ownership claim timed out');
         await new Promise(resolve=>setTimeout(resolve,20));
@@ -69,7 +69,7 @@ export class SidecarOwner {
       }
     }finally{
       try{unlinkSync(temporary);}catch(error){if(error.code!=='ENOENT')throw error;}
-      try{if(JSON.parse(readFileSync(lock,'utf8')).token===this.token)unlinkSync(lock);}catch(error){if(error.code!=='ENOENT')throw error;}
+      try{if(JSON.parse(readFileSync(lock,'utf8')).token===this.token)unlinkSync(lock);}catch(error){if(error.code!=='ENOENT'&&!(error instanceof SyntaxError))throw error;}
     }
     this.running=true;return this.isOwner();
   }

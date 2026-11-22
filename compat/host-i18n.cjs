@@ -29,8 +29,11 @@ module.exports = function createHostTranslator(initialConfig = {}) {
     [/^Side Question:\s*(.+)$/i, (_, q) => `侧边提问：${q}`],
     [/^Edit side question title:\s*(.+)$/i, (_, q) => `编辑侧边提问标题：${q}`],
     [/^Opens external link:\s*(.+)$/i, (_, u) => `打开外部链接：${u}`],
-    [/^Running\s+(.+)$/, (_, task) => `正在运行 ${task}`],
     [/^Started from\s*[“"](.+)[”"]$/, (_, src) => `从 “${src}” 启动`],
+  ];
+
+  const CONTROL_PATTERNS = [
+    [/^Running\s+(.+)$/, (_, task) => `正在运行 ${task}`],
     [/^Close\s+(.+)$/, (_, name) => `关闭 ${name}`],
   ];
 
@@ -56,16 +59,30 @@ module.exports = function createHostTranslator(initialConfig = {}) {
     '遗':'遺','邻':'鄰','针':'針','钮':'鈕','锁':'鎖','长':'長','门':'門','闲':'閒','间':'間','阅':'閱',
     '随':'隨','难':'難','顺':'順','须':'須','顾':'顧','预':'預','领':'領','风':'風','飞':'飛','验':'驗',
     '齐':'齊','码':'碼','节':'節','范':'範','获':'獲','创':'創','协':'協','双':'雙','变':'變','听':'聽',
-    '机':'機','暂':'暫','旧':'舊','统':'統','护':'護','举':'舉','挡':'擋','挥':'揮','损':'損','携':'攜',
+    '机':'機','暂':'暫','旧':'舊','护':'護','举':'舉','挡':'擋','挥':'揮','损':'損','携':'攜',
     '摄':'攝','摆':'擺','热':'熱','产':'產','画':'畫','稳':'穩','竞':'競','笔':'筆','纸':'紙','细':'細',
     '织':'織','绕':'繞','绘':'繪','绩':'績','绿':'綠','缩':'縮','见':'見','触':'觸','订':'訂','讨':'討',
     '让':'讓','讲':'講','论':'論','识':'識','译':'譯','课':'課','谈':'談','谢':'謝','负':'負','财':'財',
-    '责':'責','贵':'貴','赞':'讚','车':'車','运':'運'
+    '责':'責','贵':'貴','赞':'讚','车':'車','后':'後'
   };
+
+  const TW_POST_FIXES = [
+    ['恢複', '恢復'],
+    ['回複', '回覆'],
+    ['控製', '控制'],
+    ['限製', '限制'],
+    ['機製', '機制'],
+    ['強製', '強制'],
+    ['體製', '體制'],
+    ['定製', '訂製'],
+  ];
 
   function toTW(str) {
     let out = '';
     for (const ch of str) out += S2T[ch] || ch;
+    for (const [from, to] of TW_POST_FIXES) {
+      if (out.includes(from)) out = out.replaceAll(from, to);
+    }
     return out;
   }
 
@@ -74,6 +91,7 @@ module.exports = function createHostTranslator(initialConfig = {}) {
   let disposed = false;
   let mutating = false;
   let scheduled = false;
+  let flushCount = 0;
   const pendingRoots = new Set();
   const textOriginals = new WeakMap();
   const attrOriginals = new WeakMap();
@@ -82,7 +100,16 @@ module.exports = function createHostTranslator(initialConfig = {}) {
   const trackedTexts = new Set();
   const trackedAttrs = new Set();
 
-  function translateText(raw) {
+  function pruneDetached() {
+    for (const ref of trackedTexts) {
+      if (!ref.isConnected) trackedTexts.delete(ref);
+    }
+    for (const el of trackedAttrs) {
+      if (!el.isConnected) trackedAttrs.delete(el);
+    }
+  }
+
+  function translateText(raw, isControl = false) {
     if (!raw || typeof raw !== 'string') return null;
     const trimmed = raw.trim();
     if (!trimmed || trimmed.length > 180 || !/[A-Za-z]/.test(trimmed)) return null;
@@ -96,11 +123,25 @@ module.exports = function createHostTranslator(initialConfig = {}) {
         }
       }
     }
+    if (!zh && isControl) {
+      for (const [re, fn] of CONTROL_PATTERNS) {
+        const m = trimmed.match(re);
+        if (m) {
+          zh = fn(...m);
+          break;
+        }
+      }
+    }
     if (!zh) return null;
     if (language === 'zh-TW') zh = toTW(zh);
     const lead = raw.slice(0, raw.length - raw.trimStart().length);
     const tail = raw.slice(raw.trimEnd().length);
     return lead + zh + tail;
+  }
+
+  function isControlElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    return Boolean(el.closest('button,[role="button"],[role="menuitem"],[role="tab"],[role="status"],[role="tooltip"]'));
   }
 
   function skipElement(el, forAttr = false) {
@@ -117,9 +158,10 @@ module.exports = function createHostTranslator(initialConfig = {}) {
     if (!node || node.nodeType !== 3 || !node.isConnected) return;
     const parent = node.parentElement;
     if (skipElement(parent, false)) return;
+    const control = isControlElement(parent);
     if (!textOriginals.has(node)) {
       const val = node.nodeValue;
-      const tr = translateText(val);
+      const tr = translateText(val, control);
       if (!tr || tr === val) return;
       textOriginals.set(node, val);
       textLastTr.set(node, tr);
@@ -136,14 +178,14 @@ module.exports = function createHostTranslator(initialConfig = {}) {
       if (current !== orig) node.nodeValue = orig;
       return;
     }
-    const target = translateText(orig);
+    const target = translateText(orig, control);
     if (target && current !== target) {
       if (current === orig || current === prevTr) {
         textLastTr.set(node, target);
         node.nodeValue = target;
       } else {
         // Host framework replaced text with a different original string
-        const curTranslated = translateText(current);
+        const curTranslated = translateText(current, control);
         if (curTranslated) {
           textOriginals.set(node, current);
           textLastTr.set(node, curTranslated);
@@ -162,7 +204,7 @@ module.exports = function createHostTranslator(initialConfig = {}) {
       const cur = el.getAttribute(attr);
       if (cur == null) continue;
       if (!map || !(attr in map)) {
-        const tr = translateText(cur);
+        const tr = translateText(cur, true);
         if (!tr || tr === cur) continue;
         if (!map) {
           map = Object.create(null);
@@ -182,7 +224,7 @@ module.exports = function createHostTranslator(initialConfig = {}) {
         if (!enabled) {
           if (cur !== orig) el.setAttribute(attr, orig);
         } else {
-          const target = translateText(orig);
+          const target = translateText(orig, true);
           if (target && cur !== target) {
             if (cur === orig || cur === prevTr) {
               if (!lastMap) {
@@ -192,7 +234,7 @@ module.exports = function createHostTranslator(initialConfig = {}) {
               lastMap[attr] = target;
               el.setAttribute(attr, target);
             } else {
-              const curTr = translateText(cur);
+              const curTr = translateText(cur, true);
               if (curTr) {
                 map[attr] = cur;
                 if (!lastMap) {
@@ -266,6 +308,9 @@ module.exports = function createHostTranslator(initialConfig = {}) {
         pendingRoots.clear();
         for (const r of roots) walkSubtree(r);
       }
+      if (++flushCount % 40 === 0 || trackedTexts.size + trackedAttrs.size > 800) {
+        pruneDetached();
+      }
     } finally {
       mutating = false;
     }
@@ -334,6 +379,11 @@ module.exports = function createHostTranslator(initialConfig = {}) {
       observer.disconnect();
       pendingRoots.clear();
       restoreAll();
+      trackedTexts.clear();
+      trackedAttrs.clear();
+    },
+    _trackedCounts() {
+      return { texts: trackedTexts.size, attrs: trackedAttrs.size };
     }
   };
 };

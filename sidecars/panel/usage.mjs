@@ -43,8 +43,11 @@ async function readBounded(file,budget){
     return Buffer.concat(chunks,bytes).toString('utf8');
   }finally{await handle.close();}
 }
+const dateFormatters=new Map();
 export function dateKey(time,zone='Asia/Shanghai'){
-  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(time);
+  let fmt=dateFormatters.get(zone);
+  if(!fmt){fmt=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'});if(dateFormatters.size>32)dateFormatters.clear();dateFormatters.set(zone,fmt);}
+  const parts=fmt.formatToParts(time);
   const get=key=>parts.find(p=>p.type===key).value;return `${get('year')}-${get('month')}-${get('day')}`;
 }
 export function usageRecords(raw,conversationId){
@@ -74,7 +77,7 @@ const validRow=r=>r&&HASH.test(r.id)&&typeof r.model==='string'&&r.model.length<
   (r.at===null||Number.isSafeInteger(r.at)&&r.at>=0)&&keys.every(k=>r[k]===null||Number.isSafeInteger(r[k])&&r[k]>=0);
 export class UsageLedger{
   constructor(directory=join(platformPaths().data,'usage-v1'),{timeZone='Asia/Shanghai',source='desktop-local'}={}){this.directory=directory;this.timeZone=timeZone;this.source=source;}
-  queue=Promise.resolve();revision=0;cache=null;
+  queue=Promise.resolve();revision=0;cache=null;fileCache=new Map();summaryPending=new Map();
   async backfillState(scope,host,{preferred=[]}={}){
     if(!HASH.test(scope)||!['app','ide'].includes(host))throw Error('Invalid backfill scope');
     await this.queue.catch(()=>{});
@@ -119,12 +122,23 @@ export class UsageLedger{
       if(isCurrent()!==true)return;
       if(previous&&(previous.schema!==1||previous.account!==scope||!Array.isArray(previous.records)||!previous.records.every(validRow)))throw Error('Invalid usage ledger');
       const merged=new Map((previous?.records||[]).map(r=>[r.id,r]));
-      for(const row of rows){const old=merged.get(row.id),record={...row,at:row.at??old?.at??null,timeBasis:row.at===null&&old?.at!==null&&old?.at!==undefined?old.timeBasis:row.timeBasis};for(const key of keys)record[key]=row[key]??old?.[key]??null;merged.set(row.id,record);}
+      for(const row of rows){
+        const old=merged.get(row.id);
+        const record={...row,at:row.at??old?.at??null,timeBasis:row.at===null&&old?.at!==null&&old?.at!==undefined?old.timeBasis:row.timeBasis};
+        for(const key of keys){
+          const a=row[key],b=old?.[key]??null;
+          record[key]=a!==null&&b!==null?Math.max(a,b):(a??b);
+        }
+        const allPresent=keys.every(k=>record[k]!==null);
+        record.partial=!allPresent||Boolean(row.partial);
+        merged.set(row.id,record);
+      }
       const records=[...merged.values()].sort((a,b)=>a.id.localeCompare(b.id));
       if(previous&&JSON.stringify(previous.records)===JSON.stringify(records))return;
       await mkdir(join(this.directory,scope),{recursive:true});if(isCurrent()!==true)return;const temp=file+'.'+randomUUID()+'.tmp';
       try{await this.writeRecord(temp,JSON.stringify({schema:1,account:scope,records}));if(isCurrent()!==true)return;await rename(temp,file);}
       finally{await unlink(temp).catch(()=>{});}
+      this.fileCache.delete(file);
       this.revision++;this.cache=null;
     }).catch(error=>{if(isCurrent()===true)throw error;});this.queue=pending;return pending;
   }
@@ -133,31 +147,53 @@ export class UsageLedger{
     if(!scope||!HASH.test(scope))return null;
     const today=dateKey(now,this.timeZone),cacheKey=scope+':'+today;
     if(this.cache?.key===cacheKey&&this.cache.revision===this.revision)return this.cache.value;
+    const pendingKey=`${cacheKey}:${this.revision}`;
+    if(this.summaryPending.has(pendingKey))return this.summaryPending.get(pendingKey);
     const scanRevision=this.revision;
-    const daily=new Map(),models=new Set(),seen=new Map();let unreadable=0,unknownTokens=0,unknownRequests=0,partialRequests=0;
-    let files=[];try{files=await readdir(join(this.directory,scope));}catch(e){if(e.code!=='ENOENT')throw e;}
-    for(const name of files.filter(name=>/^[a-f0-9]{64}\.json$/.test(name))){
-      try{
-        const text=await this.readSummaryRecord(join(this.directory,scope,name));
-        const record=JSON.parse(text);if(record.schema!==1||record.account!==scope||!Array.isArray(record.records)||!record.records.every(validRow))throw Error('Invalid ledger');
-        for(const r of record.records){const previous=seen.get(r.id);if(!previous||sum(r)>sum(previous))seen.set(r.id,r);}
-      }catch{unreadable++;}
-    }
-    for(const r of seen.values()){
-      models.add(r.model);if(r.partial)partialRequests++;
-      if(r.at===null){unknownTokens+=sum(r);unknownRequests++;continue;}
-      const date=dateKey(r.at,this.timeZone);if(!daily.has(date))daily.set(date,{date,models:{}});
-      const day=daily.get(date);day.models[r.model]||={uncached:0,cacheRead:0,cacheWrite:0,output:0,total:0,requests:0};
-      const bucket=day.models[r.model];for(const key of keys)bucket[key]+=r[key]??0;bucket.total+=sum(r);bucket.requests++;
-    }
-    const days=[...daily.values()].sort((a,b)=>a.date.localeCompare(b.date));
-    const total=day=>Object.values(day.models).reduce((n,r)=>n+r.total,0);
-    const value={accountKey:scope,timeZone:this.timeZone,today,days,models:[...models].sort(),todayTokens:days.filter(d=>d.date===today).reduce((n,d)=>n+total(d),0),
-      weekTokens:days.filter(d=>d.date>=weekStart(today)&&d.date<=today).reduce((n,d)=>n+total(d),0),
-      monthTokens:days.filter(d=>d.date.slice(0,7)===today.slice(0,7)&&d.date<=today).reduce((n,d)=>n+total(d),0),
-      totalTokens:days.reduce((n,d)=>n+total(d),0)+unknownTokens,unknownTokens,unknownRequests,partialRequests,unreadableFiles:unreadable,
-      requests:seen.size,firstDate:days[0]?.date||null,updatedAt:new Date(now).toISOString(),source:this.source};
-    if(this.revision===scanRevision)this.cache={key:cacheKey,revision:scanRevision,value};return value;
+    const run=(async()=>{
+      const daily=new Map(),models=new Set(),seen=new Map();let unreadable=0,unknownTokens=0,unknownRequests=0,partialRequests=0;
+      const dirPath=join(this.directory,scope);
+      let files=[];try{files=await readdir(dirPath);}catch(e){if(e.code!=='ENOENT')throw e;}
+      const activePaths=new Set();
+      for(const name of files.filter(name=>/^[a-f0-9]{64}\.json$/.test(name))){
+        const filePath=join(dirPath,name);
+        activePaths.add(filePath);
+        try{
+          const st=await stat(filePath);
+          const cached=this.fileCache.get(filePath);
+          let fileRecords;
+          if(cached&&cached.size===st.size&&cached.mtimeMs===st.mtimeMs){
+            fileRecords=cached.records;
+          }else{
+            const text=await this.readSummaryRecord(filePath);
+            const record=JSON.parse(text);if(record.schema!==1||record.account!==scope||!Array.isArray(record.records)||!record.records.every(validRow))throw Error('Invalid ledger');
+            fileRecords=record.records;
+            if(this.revision===scanRevision)this.fileCache.set(filePath,{size:st.size,mtimeMs:st.mtimeMs,records:fileRecords});
+          }
+          for(const r of fileRecords){const previous=seen.get(r.id);if(!previous||sum(r)>sum(previous))seen.set(r.id,r);}
+        }catch{this.fileCache.delete(filePath);unreadable++;}
+      }
+      for(const cachedPath of this.fileCache.keys()){
+        if(cachedPath.startsWith(dirPath)&&!activePaths.has(cachedPath))this.fileCache.delete(cachedPath);
+      }
+      for(const r of seen.values()){
+        models.add(r.model);if(r.partial)partialRequests++;
+        if(r.at===null){unknownTokens+=sum(r);unknownRequests++;continue;}
+        const date=dateKey(r.at,this.timeZone);if(!daily.has(date))daily.set(date,{date,models:{}});
+        const day=daily.get(date);day.models[r.model]||={uncached:0,cacheRead:0,cacheWrite:0,output:0,total:0,requests:0};
+        const bucket=day.models[r.model];for(const key of keys)bucket[key]+=r[key]??0;bucket.total+=sum(r);bucket.requests++;
+      }
+      const days=[...daily.values()].sort((a,b)=>a.date.localeCompare(b.date));
+      const total=day=>Object.values(day.models).reduce((n,r)=>n+r.total,0);
+      const value={accountKey:scope,timeZone:this.timeZone,today,days,models:[...models].sort(),todayTokens:days.filter(d=>d.date===today).reduce((n,d)=>n+total(d),0),
+        weekTokens:days.filter(d=>d.date>=weekStart(today)&&d.date<=today).reduce((n,d)=>n+total(d),0),
+        monthTokens:days.filter(d=>d.date.slice(0,7)===today.slice(0,7)&&d.date<=today).reduce((n,d)=>n+total(d),0),
+        totalTokens:days.reduce((n,d)=>n+total(d),0)+unknownTokens,unknownTokens,unknownRequests,partialRequests,unreadableFiles:unreadable,
+        requests:seen.size,firstDate:days[0]?.date||null,updatedAt:new Date(now).toISOString(),source:this.source};
+      if(this.revision===scanRevision)this.cache={key:cacheKey,revision:scanRevision,value};return value;
+    })();
+    this.summaryPending.set(pendingKey,run);
+    try{return await run;}finally{if(this.summaryPending.get(pendingKey)===run)this.summaryPending.delete(pendingKey);}
   }
 }
 export function weekStart(date){const d=new Date(date+'T00:00:00Z');d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));return d.toISOString().slice(0,10);}

@@ -2,9 +2,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { cleanChildEnv } from '../../compat/platform.mjs';
 
 const exec = promisify(execFile);
-const languageServer = command => /(?:^|[\/\\])language_server(?:_(?:linux|macos|darwin)(?:_(?:x64|arm64))?)?(?:\.exe)?(?:\s|$)/.test(command);
+const languageServer = command => /(?:^|[\/\\])language_server(?:_(?:linux|macos|darwin|windows)(?:_(?:x64|arm64))?)?(?:\.exe)?(?:\s|$)/i.test(command);
 
 export function parsePs(text, uid) {
   return text.split(/\r?\n/).flatMap(line => {
@@ -61,15 +62,16 @@ export async function linuxPorts(pid, { proc = '/proc' } = {}) {
 }
 
 export async function discoverProcesses({ platform = process.platform, run = exec, uid = process.getuid?.(), proc = '/proc' } = {}) {
+  const env = cleanChildEnv();
   if (platform === 'win32') {
-    const script = "Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | Where-Object { $_.CommandLine -match '(?:^|\\s)--standalone(?:\\s|=|$)' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
-    const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:8000,maxBuffer:1048576});
+    const script = "Get-CimInstance Win32_Process -Filter \"Name LIKE 'language_server%.exe'\" | Where-Object { $_.Name -match '^language_server(?:_windows_(?:x64|arm64))?\\.exe$' -and $_.CommandLine -match '(?:^|\\s)--standalone(?:\\s|=|$)' -and -not (($o = $_ | Invoke-CimMethod -MethodName GetOwner -ErrorAction SilentlyContinue) -and $o.ReturnValue -eq 0 -and $o.User -and $o.User -ine $env:USERNAME) } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
+    const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:8000,maxBuffer:1048576,env});
     const parsed=stdout.trim()?JSON.parse(stdout.replace(/^\uFEFF/,'')):[];
     const rows=(Array.isArray(parsed)?parsed:[parsed]).filter(row=>Number.isSafeInteger(row?.ProcessId)&&row.ProcessId>0&&/(?:^|\s)--standalone(?:\s|=|$)/.test(row.CommandLine||''));
     if(!rows.length)return [];
     // One native socket-table snapshot for all candidates, rather than a costly
     // Get-NetTCPConnection/CIM query for every language_server.exe process.
-    const {stdout:sockets}=await run('netstat.exe',['-ano','-p','tcp'],{windowsHide:true,timeout:4000,maxBuffer:4194304}).catch(()=>({stdout:''}));
+    const {stdout:sockets}=await run('netstat.exe',['-ano','-p','tcp'],{windowsHide:true,timeout:4000,maxBuffer:4194304,env}).catch(()=>({stdout:''}));
     const ports=parseNetstat(sockets);
     const missing=rows.filter(row=>!ports.get(row.ProcessId)?.length).map(row=>row.ProcessId);
     if(missing.length){
@@ -77,7 +79,7 @@ export async function discoverProcesses({ platform = process.platform, run = exe
       // per process or an unverified log-only port paired with a credential.
       const script=`$pulsePids = @(${missing.join(',')}); Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $pulsePids -contains $_.OwningProcess } | Select-Object OwningProcess,LocalPort | ConvertTo-Json -Compress`;
       try{
-        const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:8000,maxBuffer:1048576});
+        const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true,timeout:8000,maxBuffer:1048576,env});
         const value=stdout.trim()?JSON.parse(stdout.replace(/^\uFEFF/,'')):[];
         for(const item of Array.isArray(value)?value:[value]){
           const pid=Number(item?.OwningProcess),port=Number(item?.LocalPort);
@@ -89,10 +91,10 @@ export async function discoverProcesses({ platform = process.platform, run = exe
     return rows.map(row=>({...row,Ports:ports.get(row.ProcessId)||[]}));
   }
   if (platform === 'darwin') {
-    const {stdout}=await run('/bin/ps',['-ww','-axo','pid=,uid=,args='],{timeout:8000,maxBuffer:4194304});
+    const {stdout}=await run('/bin/ps',['-ww','-axo','pid=,uid=,args='],{timeout:8000,maxBuffer:4194304,env});
     const rows=parsePs(stdout,uid);
     if(!rows.length)return [];
-    const {stdout:sockets}=await run('/usr/sbin/lsof',['-nP','-a','-p',rows.map(r=>r.ProcessId).join(','),'-iTCP','-sTCP:LISTEN','-Fpn'],{timeout:8000,maxBuffer:1048576}).catch(error=>{if(error.code===1)return {stdout:error.stdout||''};throw error;});
+    const {stdout:sockets}=await run('/usr/sbin/lsof',['-nP','-a','-p',rows.map(r=>r.ProcessId).join(','),'-iTCP','-sTCP:LISTEN','-Fpn'],{timeout:8000,maxBuffer:1048576,env}).catch(error=>{if(error.code===1)return {stdout:error.stdout||''};throw error;});
     const ports=parseLsof(sockets);
     return rows.map(row=>({...row,Ports:ports.get(row.ProcessId)||[]}));
   }

@@ -95,7 +95,8 @@ module.exports = function createUpdateMenu({root,row,language,setMarkup,request,
  menu.firstElementChild.addEventListener('click',()=>{closeMenu();onOpen?.();dialog.showModal();void call('check');});
  $('update-close').addEventListener('click',()=>{dialog.close();closeMenu();});
  $('update-action').addEventListener('click',()=>void call(state.state==='installed'?'reload':state.state==='error'?'check':'apply'));
- root.addEventListener('pointerdown',event=>{const path=event.composedPath();if(!path.includes(menu)&&!path.includes(button))closeMenu();});
+ const onOutsidePointerDown=event=>{const path=event.composedPath();if(!path.includes(menu)&&!path.includes(button))closeMenu();};
+ root.addEventListener('pointerdown',onOutsidePointerDown);
  menu.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeMenu();button.focus();}});
- render();return {localize:render,dispose(){disposed=true;epoch++;clearTimeout(timer);cancelAnimationFrame(meterFrame);cancelAnimationFrame(meterRestoreFrame);dialog.close();dialog.remove();menu.remove();button.remove();css.remove();}};
+ render();return {localize:render,dispose(){disposed=true;epoch++;clearTimeout(timer);cancelAnimationFrame(meterFrame);cancelAnimationFrame(meterRestoreFrame);root.removeEventListener('pointerdown',onOutsidePointerDown);dialog.close();dialog.remove();menu.remove();button.remove();css.remove();}};
 };
