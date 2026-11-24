@@ -1,8 +1,8 @@
 {
   "name": "antigravity-pulse",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "private": true,
-  "description": "Claude-style inline step card, token throughput/cache/context & quota monitor, anti-stall monitor, and auto Chinese title renamer for Antigravity",
+  "description": "Native update_steps sync (zero-duplicate), anti-stall wake-up, token throughput/cache/context & quota monitor, host UI localization, and auto Chinese title renamer for Antigravity",
   "license": "MIT",
   "scripts": {
     "test": "node --test --test-timeout=60000 sidecars/panel/tests/*.test.mjs cli/tests/*.test.mjs",

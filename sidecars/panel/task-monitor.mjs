@@ -146,6 +146,8 @@ export class TaskMonitor {
       : (tState.prevTurnEndMs || 0);
     const activeTranscriptSteps = pendingNewUserTurn ? [] : tState.steps;
     const activeTurnToolSteps = pendingNewUserTurn ? [] : tState.turnToolSteps;
+    const activeNativeSteps = pendingNewUserTurn ? [] : (tState.nativeSteps || []);
+    const activeFocus = pendingNewUserTurn ? '' : (tState.focus || '');
 
     // 4. 读取可选的 scratch/task_steps.json（模型显式写入的精确步骤；严格隔离上一轮已完成旧文件）
     let filePlan = null;
@@ -306,18 +308,25 @@ export class TaskMonitor {
         status = 'running';
         const act = this.formatToolAction(hookToolName, hookToolArgs);
         const subSuffix = hasRunningSubagents ? ` · ${runningSubagentCount} 子代理` : '';
-        headline = act ? `⚙️ ${act}${subSuffix}` : `🤔 思考推进中 (${silenceSec}s)`;
+        headline = act
+          ? `⚙️ ${act}${subSuffix}`
+          : activeFocus
+            ? `⚙️ ${activeFocus}${subSuffix}`
+            : `🤔 思考推进中 (${silenceSec}s)`;
       } else if (hasBgTaskRunning && latestTask) {
         status = 'running';
         headline = `⚙️ 后台任务: ${latestTask.name}`;
       } else if (hasRunningSubagents) {
         status = 'running';
         headline = `🔄 ${runningSubagentCount} 个子代理协同推进中`;
+      } else if (activeFocus) {
+        status = 'running';
+        headline = `⚙️ ${activeFocus}`;
       } else {
         status = 'running';
         headline = `🤔 思考规划中 (${silenceSec}s)`;
       }
-    } else if (turnFinished && (activeTranscriptSteps.length > 0 || activeTurnToolSteps.length > 0 || filePlan || effectiveTurnStartMs > 0)) {
+    } else if (turnFinished && (activeNativeSteps.length > 0 || activeTranscriptSteps.length > 0 || activeTurnToolSteps.length > 0 || filePlan || effectiveTurnStartMs > 0)) {
       if ((lifecycle?.terminationReason === 'ERROR' && lifecycleMs >= (effectiveTurnStartMs || 0)) || abortedByError) {
         status = 'idle';
         headline = '⚠️ 上轮执行异常中断';
@@ -326,6 +335,7 @@ export class TaskMonitor {
         headline = '⏹ 已手动中止';
       } else {
         const hadMultiStep = Boolean(
+          activeNativeSteps.length >= 2 ||
           filePlan ||
           activeTranscriptSteps.length >= 2 ||
           activeTurnToolSteps.length >= 2 ||
@@ -336,11 +346,27 @@ export class TaskMonitor {
       }
     }
 
-    // 7. 组装步骤清单（只读，100% 由 AI 实时运行驱动：scratch/task_steps.json > 模型计划列表 > 真实工具执行时间线）
+    // 7. 组装步骤清单（只读，100% 由 AI 实时运行驱动：官方 update_steps > scratch/task_steps.json > 模型计划列表 > 真实工具执行时间线）
     let baseSteps = [];
     let hasRealSteps = false;
+    const hasNativeStepPlan = activeNativeSteps.length >= 2;
+    const settledNormally = turnFinished && !['ERROR', 'USER_CANCELED'].includes(lifecycle?.terminationReason || '') && !abortedByError;
 
-    if (filePlan?.steps?.length >= 2) {
+    if (hasNativeStepPlan) {
+      baseSteps = activeNativeSteps.slice(0, 12).map((s, i) => {
+        const nextStatus = settledNormally && !s.failed ? 'completed' : s.status;
+        return {
+          id: i + 1,
+          title: s.title,
+          status: nextStatus,
+          percent: nextStatus === 'completed' ? 100 : (nextStatus === 'running' ? 50 : 0),
+          explicit: true,
+          ...(s.skipped ? { skipped: true } : {}),
+          ...(s.failed ? { failed: true } : {})
+        };
+      });
+      hasRealSteps = true;
+    } else if (filePlan?.steps?.length >= 2) {
       baseSteps = filePlan.steps.slice(0, 8).map((s, i) => {
         const rawStatus = VALID_STEP_STATUSES.has(s.status) ? s.status : 'pending';
         return {
@@ -412,11 +438,12 @@ export class TaskMonitor {
       hasRealSteps = activeTurnToolSteps.length >= 2 || (activeTurnToolSteps.length >= 1 && inActiveTurn) || hasRunningSubagents || hasRunningBgTasks;
     }
 
-    // 关键不变量：只要本轮仍在运行（含子代理或后台任务运行中），步骤列表绝不能全部渲染为 completed
+    // 关键不变量：只要本轮仍在运行（含子代理或后台任务运行中），步骤列表绝不能全部渲染为 completed；
+    // 但已被官方明确标记为 failed 的终态步骤绝不可被改写回 running 或计入活动进度。
     if (inActiveTurn && baseSteps.length > 0) {
-      const hasActiveStep = baseSteps.some(s => s.status === 'running' || s.status === 'stalled');
+      const hasActiveStep = baseSteps.some(s => s.status === 'running' || (s.status === 'stalled' && !s.failed));
       if (!hasActiveStep) {
-        const firstPendingIdx = baseSteps.findIndex(s => s.status !== 'completed');
+        const firstPendingIdx = baseSteps.findIndex(s => s.status === 'pending' && !s.failed && !s.skipped);
         if (firstPendingIdx >= 0) {
           baseSteps[firstPendingIdx] = {
             ...baseSteps[firstPendingIdx],
@@ -449,13 +476,21 @@ export class TaskMonitor {
               percent: 0
             });
           }
-        } else {
-          const lastIdx = baseSteps.length - 1;
-          baseSteps[lastIdx] = {
-            ...baseSteps[lastIdx],
-            status: isStalled ? 'stalled' : 'running',
-            percent: 50
-          };
+        } else if (!baseSteps.some(s => s.failed)) {
+          let demoteIdx = -1;
+          for (let i = baseSteps.length - 1; i >= 0; i--) {
+            if (!baseSteps[i].skipped && !baseSteps[i].failed) {
+              demoteIdx = i;
+              break;
+            }
+          }
+          if (demoteIdx >= 0) {
+            baseSteps[demoteIdx] = {
+              ...baseSteps[demoteIdx],
+              status: isStalled ? 'stalled' : 'running',
+              percent: 50
+            };
+          }
         }
       }
     }
@@ -478,16 +513,20 @@ export class TaskMonitor {
       steps = steps.map(s => (s.status === 'running' ? { ...s, status: 'stalled' } : s));
     }
 
-    // 8. 计算总进度百分比（运行中严禁提前显示 100%）
-    const completedCount = steps.filter(s => s.status === 'completed').length;
-    const activeCount = steps.filter(s => s.status === 'running' || s.status === 'stalled').length;
+    // 8. 计算总进度百分比（运行中严禁提前显示 100%；跳过步骤不计入分母，与官方 step-plan 一致）
+    const countedSteps = steps.filter(s => !s.skipped);
+    const totalCounted = countedSteps.length;
+    const completedCount = countedSteps.filter(s => s.status === 'completed').length;
+    const activeCount = countedSteps.filter(s => s.status === 'running' || (s.status === 'stalled' && !s.failed)).length;
     let progressPercent = 0;
     if (status === 'idle' && !hasRealSteps) {
       progressPercent = 0;
-    } else if (steps.length > 0) {
-      progressPercent = Math.round(((completedCount + activeCount * 0.5) / steps.length) * 100);
-      if (completedCount === steps.length) progressPercent = 100;
+    } else if (totalCounted > 0) {
+      progressPercent = Math.round(((completedCount + activeCount * 0.5) / totalCounted) * 100);
+      if (completedCount === totalCounted) progressPercent = 100;
       if (!turnFinished && progressPercent >= 100) progressPercent = 95;
+    } else if (steps.length > 0 && turnFinished) {
+      progressPercent = 100;
     }
 
     // 9. 本轮真实耗时（结束即冻结；若子代理仍在运行则持续计时）
@@ -511,9 +550,11 @@ export class TaskMonitor {
       ? `subagents (${runningSubagentCount}) · transcript`
       : hasRunningBgTasks
         ? `tasks (${runningBgTaskCount}) · transcript`
-        : effectiveEvent
-          ? `hooks (${effectiveEvent}) · transcript`
-          : 'transcript.jsonl';
+        : hasNativeStepPlan
+          ? 'update_steps · transcript'
+          : effectiveEvent
+            ? `hooks (${effectiveEvent}) · transcript`
+            : 'transcript.jsonl';
 
     const effectiveLatestTask = !turnFinished
       ? (latestTask
@@ -556,10 +597,49 @@ export class TaskMonitor {
       dataSource,
       runningSubagents: runningSubagentCount,
       turnStepIdx: pendingNewUserTurn ? (tState.turnStepIdx + 1) : tState.turnStepIdx,
-      showInlineCard: Boolean(hasRealSteps && steps.length >= 2),
+      hasNativeStepPlan,
+      showInlineCard: Boolean(hasRealSteps && steps.length >= 2 && (!hasNativeStepPlan || isStalled)),
       steps,
       latestTask: effectiveLatestTask
     };
+  }
+
+  parseOfficialSteps(rawSteps) {
+    let arr = rawSteps;
+    if (typeof arr === 'string') {
+      try {
+        arr = JSON.parse(arr);
+      } catch {
+        return null;
+      }
+    }
+    if (!Array.isArray(arr)) return null;
+    if (arr.length === 0) return [];
+    const out = [];
+    for (const item of arr.slice(0, 12)) {
+      if (!item || typeof item !== 'object') continue;
+      const title = this.cleanStepTitle(item.title);
+      if (!title) continue;
+      const rawStatus = typeof item.status === 'string' ? item.status.trim().toLowerCase() : 'pending';
+      let status = 'pending';
+      let skipped = false;
+      let failed = false;
+      if (rawStatus === 'done' || rawStatus === 'completed') status = 'completed';
+      else if (rawStatus === 'skipped') { status = 'completed'; skipped = true; }
+      else if (rawStatus === 'in_progress' || rawStatus === 'running') status = 'running';
+      else if (rawStatus === 'failed') { status = 'stalled'; failed = true; }
+      else if (rawStatus === 'stalled') status = 'stalled';
+      out.push({
+        id: out.length + 1,
+        title,
+        status,
+        percent: status === 'completed' ? 100 : (status === 'running' ? 50 : 0),
+        explicit: true,
+        ...(skipped ? { skipped: true } : {}),
+        ...(failed ? { failed: true } : {})
+      });
+    }
+    return out;
   }
 
   async probeSubagentsActivity(runningIds) {
@@ -658,6 +738,7 @@ export class TaskMonitor {
 
   formatToolAction(name, args) {
     if (!name) return '执行操作中';
+    if (name === 'update_steps' || name === 'update_focus') return null;
     if (name === 'run_command') {
       return this.describeCommand(args?.toolSummary, args?.CommandLine);
     }
@@ -749,11 +830,14 @@ export class TaskMonitor {
         remainder: '',
         decoder: new StringDecoder('utf8'),
         steps: [],
+        nativeSteps: [],
+        focus: '',
         turnToolSteps: [],
         planStepIdx: -1,
         modelStepsAfterPlan: 0,
         objective: '',
         lastUserInputGoal: '',
+        lastUserInputTs: 0,
         turnStepIdx: -1,
         turnStartMs: 0,
         turnEndMs: 0,
@@ -776,7 +860,11 @@ export class TaskMonitor {
         cache.remainder = '';
         cache.decoder = new StringDecoder('utf8');
         cache.steps = [];
+        cache.nativeSteps = [];
+        cache.focus = '';
         cache.turnToolSteps = [];
+        cache.turnStepIdx = -1;
+        cache.lastUserInputTs = 0;
         cache.planStepIdx = -1;
         cache.modelStepsAfterPlan = 0;
         cache.waitingOnBoard = false;
@@ -836,7 +924,10 @@ export class TaskMonitor {
         }
 
         const stepTs = step.created_at ? Date.parse(step.created_at) : 0;
-        const stepIdx = typeof step.step_index === 'number' ? step.step_index : -1;
+        const rawIdx = typeof step.step_index === 'number'
+          ? step.step_index
+          : (typeof step.step_index === 'string' && /^\d+$/.test(step.step_index.trim()) ? Number(step.step_index.trim()) : -1);
+        const stepIdx = Number.isInteger(rawIdx) && rawIdx >= 0 ? rawIdx : -1;
         if (stepTs > 0 && (!cache.firstSeenStepMs || stepTs < cache.firstSeenStepMs)) {
           cache.firstSeenStepMs = stepTs;
         }
@@ -851,12 +942,14 @@ export class TaskMonitor {
         }
 
         if (step.type === 'USER_INPUT' && step.source === 'USER_EXPLICIT') {
-          if (stepIdx !== cache.turnStepIdx) {
+          const isExactDuplicate = stepIdx >= 0 && stepIdx === cache.turnStepIdx && stepTs > 0 && stepTs === cache.lastUserInputTs;
+          if (!isExactDuplicate) {
             const hasPrevTurn = cache.turnStepIdx >= 0;
             if (cache.turnEndMs > 0) cache.prevTurnEndMs = cache.turnEndMs;
             else if (hasPrevTurn && prevSeenStepTs > 0 && (!stepTs || stepTs < prevSeenStepTs)) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, prevSeenStepTs);
             else if (hasPrevTurn && stepTs > 0 && cache.turnStartMs > 0) cache.prevTurnEndMs = Math.max(cache.prevTurnEndMs || 0, stepTs - 200);
-            cache.turnStepIdx = stepIdx;
+            cache.turnStepIdx = stepIdx >= 0 ? stepIdx : (cache.turnStepIdx >= 0 ? cache.turnStepIdx + 1 : 0);
+            cache.lastUserInputTs = stepTs || 0;
             cache.turnStartMs = stepTs > 0 ? Math.max(stepTs, hasPrevTurn ? (cache.prevTurnEndMs || 0) : 0) : now;
             cache.turnEndMs = 0;
             cache.lastErrorMs = 0;
@@ -864,6 +957,8 @@ export class TaskMonitor {
             cache.waitingOnBoard = false;
             cache.pendingTimerConditions = [];
             cache.steps = [];
+            cache.nativeSteps = [];
+            cache.focus = '';
             cache.turnToolSteps = [];
             cache.planStepIdx = -1;
             cache.modelStepsAfterPlan = 0;
@@ -965,6 +1060,15 @@ export class TaskMonitor {
           const hasTools = toolCalls.length > 0;
           cache.waitingOnBoard = toolCalls.some(tc => BOARD_WAIT_TOOLS.has(tc?.name));
           for (const tc of toolCalls) {
+            if (tc?.name === 'update_steps' && tc?.args?.steps !== undefined) {
+              const parsedOfficial = this.parseOfficialSteps(tc.args.steps);
+              if (Array.isArray(parsedOfficial)) {
+                cache.nativeSteps = parsedOfficial.length >= 2 ? parsedOfficial : [];
+              }
+            }
+            if (tc?.name === 'update_focus' && tc?.args?.focus !== undefined) {
+              cache.focus = this.cleanStepTitle(this.unwrapArg(tc.args.focus)) || '';
+            }
             if (tc?.name === 'schedule' && tc?.args) {
               const cond = this.unwrapArg(tc.args.TimerCondition);
               cache.pendingTimerConditions.push(cond && cond !== 'never' ? cond : null);

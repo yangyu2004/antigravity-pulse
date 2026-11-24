@@ -248,3 +248,62 @@ test('host-i18n fixes zh-TW multi-char phrases, restricts broad patterns to cont
     globalThis.requestAnimationFrame = prevRaf;
   }
 });
+
+test('host-i18n localizes official 2.34.0 step-plan card, chip & progress updates cleanly', () => {
+  const { FakeElement, FakeText, document, FakeMutationObserver } = makeMiniDom();
+  const prevDoc = globalThis.document;
+  const prevNodeFilter = globalThis.NodeFilter;
+  const prevObserver = globalThis.MutationObserver;
+  const prevRaf = globalThis.requestAnimationFrame;
+
+  globalThis.document = document;
+  globalThis.NodeFilter = { SHOW_ELEMENT: 1, SHOW_TEXT: 4 };
+  globalThis.MutationObserver = FakeMutationObserver;
+  globalThis.requestAnimationFrame = fn => { fn(); return 1; };
+
+  try {
+    const plan = new FakeElement('div', { 'data-testid': 'step-plan' });
+    const ol = new FakeElement('ol', { 'aria-label': 'Plan, 3 of 5 steps done' });
+    const sr1 = new FakeElement('span'); const t1 = new FakeText('In progress'); sr1.append(t1);
+    const sr2 = new FakeElement('span'); const t2 = new FakeText('Not started'); sr2.append(t2);
+    const sr3 = new FakeElement('span'); const t3 = new FakeText('Done'); sr3.append(t3);
+    const sr4 = new FakeElement('span'); const t4 = new FakeText('Skipped'); sr4.append(t4);
+    const sr5 = new FakeElement('span'); const t5 = new FakeText('Failed'); sr5.append(t5);
+    ol.append(sr1, sr2, sr3, sr4, sr5);
+    plan.append(ol);
+
+    const chip = new FakeElement('button', { 'data-testid': 'step-plan-chip', 'aria-label': '3/5 steps · 1 failed · 1 skipped. Hide plan' });
+    const chipTxt = new FakeText('3/5 steps · 1 failed · 1 skipped');
+    chip.append(chipTxt);
+
+    const updates = new FakeElement('button', { 'data-testid': 'progress-updates-collapsible' });
+    const updatesTxt = new FakeText('Worked for 12s · 3 updates');
+    updates.append(updatesTxt);
+
+    document.body.append(plan, chip, updates);
+    const tr = createHostTranslator({ enabled: true, language: 'zh-CN' });
+
+    assert.equal(ol.getAttribute('aria-label'), '计划，已完成 3 / 5 步');
+    assert.equal(t1.nodeValue, '进行中');
+    assert.equal(t2.nodeValue, '未开始');
+    assert.equal(t3.nodeValue, '已完成');
+    assert.equal(t4.nodeValue, '已跳过');
+    assert.equal(t5.nodeValue, '失败');
+    assert.equal(chipTxt.nodeValue, '3/5 步 · 1 项失败 · 1 项跳过');
+    assert.equal(chip.getAttribute('aria-label'), '3/5 步 · 1 项失败 · 1 项跳过。隐藏计划');
+    assert.equal(updatesTxt.nodeValue, '已执行 12 秒 · 3 条更新');
+
+    tr.setConfig({ enabled: true, language: 'zh-TW' });
+    assert.equal(ol.getAttribute('aria-label'), '計畫，已完成 3 / 5 步');
+    assert.equal(chip.getAttribute('aria-label'), '3/5 步 · 1 項失敗 · 1 項跳過。隱藏計畫');
+
+    tr.dispose();
+    assert.equal(chipTxt.nodeValue, '3/5 steps · 1 failed · 1 skipped');
+    assert.equal(updatesTxt.nodeValue, 'Worked for 12s · 3 updates');
+  } finally {
+    globalThis.document = prevDoc;
+    globalThis.NodeFilter = prevNodeFilter;
+    globalThis.MutationObserver = prevObserver;
+    globalThis.requestAnimationFrame = prevRaf;
+  }
+});

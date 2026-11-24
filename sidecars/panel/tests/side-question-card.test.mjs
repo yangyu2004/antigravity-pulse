@@ -1077,3 +1077,56 @@ test('2.34.0 input-stop-button and localized 停止执行 aria-label both report
     });
   }
 });
+
+test('official [data-testid="step-plan"] suppresses duplicate plugin card and shows stalled-only bar on stall', async () => {
+  const convId = '77777777-7777-7777-7777-777777777777';
+  let stalled = false;
+  await withMockBrowser(() => createTestDom({ pathname: `/c/${convId}` }), async ({ win, doc, MiniElement, makeComposer, makeResponse }) => {
+    const view = new MiniElement('div', { 'data-testid': 'conversation-view', 'data-cascade-id': convId });
+    const resp = makeResponse();
+    const officialPlan = new MiniElement('div', { 'data-testid': 'step-plan' });
+    officialPlan.textContent = 'Official step plan';
+    resp.stepList.append(officialPlan);
+    const comp = makeComposer(true);
+    view.append(resp.resp, comp.box);
+    doc.body.append(view);
+    doc.activeElement = comp.editor;
+
+    win.agPulseHost = {
+      getPreferences: async () => ({ language: 'zh-CN', languageGuideDismissed: true, usageGuideDismissed: true, revision: 1 }),
+      setPreferences: async i => i,
+      report: () => {},
+      getMetrics: async () => ({
+        connection: 'live',
+        groups: [],
+        speed: null,
+        taskProgress: {
+          status: stalled ? 'stalled' : 'running',
+          isStalled: stalled,
+          stalledDuration: stalled ? 185 : 0,
+          stalledReason: stalled ? '模型思考已连续 185 秒无新响应' : null,
+          progressPercent: 50,
+          turnStepIdx: 9,
+          hasNativeStepPlan: true,
+          showInlineCard: stalled,
+          steps: [
+            { id: 1, title: '官方步骤 1', status: 'completed', percent: 100 },
+            { id: 2, title: '官方步骤 2', status: stalled ? 'stalled' : 'running', percent: 50 },
+          ],
+        },
+      }),
+    };
+
+    installWidget();
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(Boolean(resp.stepList.querySelector('.ag-pulse-inline-chat-host')), false, 'Must not render duplicate inline card alongside official step-plan');
+
+    // Trigger stalled state -> show compact wake-up bar ONLY (hide duplicate ic-list)
+    stalled = true;
+    await new Promise(r => setTimeout(r, 1300));
+    const host = resp.stepList.querySelector('.ag-pulse-inline-chat-host');
+    assert.ok(host, 'Stalled state should mount recovery wake-up banner');
+    assert.equal(host.shadowRoot.getElementById('ic-stalled-bar').hidden, false, 'Stalled recovery bar must be visible');
+    assert.equal(host.shadowRoot.getElementById('ic-list').hidden, true, 'Duplicate step list must stay hidden when official step-plan exists');
+  });
+});

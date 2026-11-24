@@ -1,7 +1,7 @@
 {
   "name": "antigravity-pulse",
   "display_name": "Antigravity Pulse",
-  "description": "Claude 风格对话步骤卡片、Token 吞吐率/缓存/上下文与 5h·周配额监控、防卡死一键唤醒及新建中文对话自动重命名（支持中英文一键切换）。",
-  "version": "0.9.10",
+  "description": "联动官方步骤卡片（防重影避让）与防卡死一键唤醒、Token 吞吐率/缓存/上下文与 5h·周配额监控、全界面实时汉化及新建中文对话自动重命名。",
+  "version": "0.9.11",
   "logo": "assets/logo.svg"
 }

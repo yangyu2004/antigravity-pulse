@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.11 — 2026-11-25
+
+- **原生联动 Antigravity `2.34.0+` 官方 `update_steps` 步骤卡片（彻底消除双卡片重影）**：
+  - `sidecars/panel/task-monitor.mjs` 新增 `parseOfficialSteps()`，直接从 `transcript.jsonl` 解析官方 `update_steps`（`pending`/`in_progress`/`done`/`skipped`/`failed`）与 `update_focus`，同步驱动底部进度百分比胶囊、实时状态文案与卡死监控，并将 `update_steps`/`update_focus` 从工具步骤时间线过滤（不再生成 `调用工具 update_steps` 噪音）。
+  - `compat/inline-widget.cjs` 新增 `hasOfficialStepPlan()`：检测到回复气泡内已有官方 `[data-testid="step-plan"]` / `[data-testid="step-plan-chip"]`（或 `tp.hasNativeStepPlan`）时自动避让隐藏插件自绘卡片；仅当发生卡死预警时弹出精简单行 `⚠️ … ⚡ 重新调起` 唤醒横幅（隐藏重复步骤列表），在无官方步骤卡的旧版本或纯工具流场景中继续按需兜底渲染。
+- **更新 `rules/AGENTS.md` 与产品文档定位**：
+  - 废除每次多步任务手写 `scratch/task_steps.json` 的规则要求，改为优先使用官方原生 `update_steps` / `update_focus`，保留三段式对话节奏与简明中文 `toolSummary` 规范（后端仍向后兼容读取历史 `task_steps.json`）。
+- **补齐官方新步骤卡片与进度时间线汉化**：
+  - `compat/host-i18n.cjs` 补充 `Not started`、`In progress`、`Done`、`Skipped`、`Failed`、`Task not found`、`Hide/Show plan`，以及 `N/M steps · F failed · S skipped`、`Plan, N of M steps done`、`Worked for Xs · N updates`、`N updates` 等动态正则词条。
+- **包含安全加固与稳定性修复（`1f7ac6d`）**：
+  - 合并本地已完成的安全边界加固、监控/用量统计稳定性优化及对话卡片防闪烁修复，并补充回归测试。
+
 ## 0.9.10 — 2026-11-22
 
 - **紧急适配 Antigravity `2.34.0+` 移除命令行 `--csrf_token` 导致全指标离线的问题**：

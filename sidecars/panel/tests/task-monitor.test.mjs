@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, utimes, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, utimes, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TaskMonitor } from '../task-monitor.mjs';
@@ -495,6 +495,171 @@ test('queued USER_INPUT with earlier timestamp clamps turnStartMs to prevTurnEnd
     assert.equal(snap.turnStepIdx, 3);
     assert.equal(snap.showInlineCard, false, 'Old turn task_steps.json must not leak into queued new turn');
     assert.ok(snap.elapsedSeconds <= 6, `Expected elapsedSeconds clamped near prevEnd (<=6s), got ${snap.elapsedSeconds}`);
+  } finally {
+    await rm(brainRoot, { recursive: true, force: true });
+  }
+});
+
+test('official update_steps & update_focus drive progress capsule without duplicate inline card or raw meta tool steps', async () => {
+  const brainRoot = await mkdtemp(join(tmpdir(), 'pulse-tm-native-steps-'));
+  try {
+    const now = Date.now();
+    const t0 = now - 8_000;
+    const officialSteps = [
+      { title: '检查项目配置', status: 'done' },
+      { title: '修改核心逻辑', status: 'in_progress' },
+      { title: '跳过无关步骤', status: 'skipped' },
+      { title: '失败重试项', status: 'failed' },
+      { title: '运行回归单测', status: 'pending' },
+    ];
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n同步官方步骤卡片\n</USER_REQUEST>' },
+        {
+          step_index: 1,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          created_at: new Date(t0 + 1000).toISOString(),
+          tool_calls: [
+            { name: 'update_focus', args: { focus: '正在解析官方步骤卡片结构' } },
+            { name: 'update_steps', args: { steps: JSON.stringify(officialSteps) } },
+            { name: 'read_file', args: { Path: '/repo/sidecars/panel/task-monitor.mjs' } },
+          ],
+        },
+      ],
+      transcriptMtimeMs: now - 1000,
+    });
+
+    const monitor = new TaskMonitor({ brainRoot });
+    const snap = await monitor.snapshot(ROOT_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now - 1000, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+
+    assert.equal(snap.status, 'running');
+    assert.equal(snap.hasNativeStepPlan, true);
+    assert.equal(snap.showInlineCard, false, 'Official update_steps card must suppress duplicate plugin inline card when not stalled');
+    assert.equal(snap.dataSource, 'update_steps · transcript');
+    assert.equal(snap.headline, '⚙️ 正在解析官方步骤卡片结构');
+    assert.equal(snap.steps.length, 5);
+    assert.equal(snap.steps[0].status, 'completed');
+    assert.equal(snap.steps[1].status, 'running');
+    assert.equal(snap.steps[2].skipped, true);
+    assert.equal(snap.steps[3].failed, true);
+    assert.equal(snap.steps[4].status, 'pending');
+    // 4 counted steps (1 skipped excluded), 1 done + 0.5 running (failed=0) => 1.5 / 4 = 38%
+    assert.equal(snap.progressPercent, 38);
+    assert.ok(!snap.steps.some(s => /update_steps|update_focus/.test(s.title)), 'Meta tools must never leak into step titles');
+    assert.equal(monitor.formatToolAction('update_steps', {}), null);
+    assert.equal(monitor.formatToolAction('update_focus', {}), null);
+
+    // When a new USER_INPUT turn begins, previous official update_steps & focus must clear cleanly
+    const tNew = now - 500;
+    await setupBrainConv(brainRoot, ROOT_ID, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n同步官方步骤卡片\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 1000).toISOString(), tool_calls: [{ name: 'update_steps', args: { steps: JSON.stringify(officialSteps) } }] },
+        { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 3000).toISOString(), content: '完成。', tool_calls: [] },
+        { step_index: 3, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(tNew).toISOString(), content: '<USER_REQUEST>\n开始下一轮任务\n</USER_REQUEST>' },
+      ],
+      transcriptMtimeMs: now,
+    });
+    const nextMonitor = new TaskMonitor({ brainRoot });
+    const nextSnap = await nextMonitor.snapshot(ROOT_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(nextSnap.hasNativeStepPlan, false);
+    assert.equal(nextSnap.showInlineCard, false);
+
+    // P1 regression: [done, failed] during active turn must keep failed untouched (never rewrite to running or inflate to 75%)
+    const failedSteps = [
+      { title: '步骤 1', status: 'done' },
+      { title: '步骤 2（已失败）', status: 'failed' },
+    ];
+    await setupBrainConv(brainRoot, CHILD_A, {
+      transcriptLines: [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n测试失败步骤保真\n</USER_REQUEST>' },
+        { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 1000).toISOString(), tool_calls: [{ name: 'update_steps', args: { steps: JSON.stringify(failedSteps) } }] },
+      ],
+      transcriptMtimeMs: now - 500,
+    });
+    const failedSnap = await new TaskMonitor({ brainRoot }).snapshot(CHILD_A, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now - 500, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(failedSnap.steps[1].failed, true);
+    assert.equal(failedSnap.steps[1].status, 'stalled', 'Failed step must not be rewritten back to running');
+    assert.equal(failedSnap.progressPercent, 50, '1 done + 1 failed must be 50%, never inflated to 75%');
+
+    // P2 regression: consecutive USER_INPUT rows with missing or non-numeric step_index still reset nativeSteps & focus
+    await setupBrainConv(brainRoot, CHILD_B, {
+      transcriptLines: [
+        { source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n第一轮无索引\n</USER_REQUEST>' },
+        { source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 500).toISOString(), tool_calls: [
+          { name: 'update_focus', args: { focus: '旧轮焦点' } },
+          { name: 'update_steps', args: { steps: JSON.stringify(officialSteps) } },
+        ] },
+        { source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 2000).toISOString(), content: '结束。', tool_calls: [] },
+        { source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(tNew).toISOString(), content: '<USER_REQUEST>\n第二轮也无索引\n</USER_REQUEST>' },
+      ],
+      transcriptMtimeMs: now,
+    });
+    const missingIdxSnap = await new TaskMonitor({ brainRoot }).snapshot(CHILD_B, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(missingIdxSnap.hasNativeStepPlan, false, 'Missing step_index on new USER_INPUT must still clear previous update_steps');
+    assert.ok(!String(missingIdxSnap.headline || '').includes('旧轮焦点'), 'Missing step_index on new USER_INPUT must still clear previous update_focus');
+
+    // Round 2 regressions: [done, skipped] keeps skipped untouched; string step_index & missing-ts duplicate index reset; empty update_steps/update_focus clear
+    const SKIP_ID = '44444444-4444-4444-4444-444444444444';
+    await setupBrainConv(brainRoot, SKIP_ID, {
+      transcriptLines: [
+        { step_index: '4', source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date(t0).toISOString(), content: '<USER_REQUEST>\n测试跳过步骤保真\n</USER_REQUEST>' },
+        { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 500).toISOString(), tool_calls: [
+          { name: 'update_steps', args: { steps: [{ title: '步骤 A', status: 'done' }, { title: '步骤 B（跳过）', status: 'skipped' }] } },
+        ] },
+      ],
+      transcriptMtimeMs: now - 400,
+    });
+    const skipMonitor = new TaskMonitor({ brainRoot });
+    const skipSnap = await skipMonitor.snapshot(SKIP_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now - 400, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(skipSnap.turnStepIdx, 4, 'Pure numeric string step_index must parse to integer 4');
+    assert.equal(skipSnap.steps[1].skipped, true);
+    assert.equal(skipSnap.steps[1].status, 'completed', 'Skipped step must never be rewritten into running');
+    assert.equal(skipSnap.steps[0].status, 'running');
+    assert.equal(skipSnap.progressPercent, 50);
+
+    // Same step_index=4 with missing created_at (not an exact duplicate!) must still reset nativeSteps & focus
+    const transcriptFile = join(brainRoot, SKIP_ID, '.system_generated', 'logs', 'transcript.jsonl');
+    const appendRows = [
+      { step_index: 6, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 900).toISOString(), tool_calls: [{ name: 'update_focus', args: { focus: '临时焦点' } }] },
+      { step_index: 7, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 1100).toISOString(), tool_calls: [{ name: 'update_steps', args: { steps: [] } }, { name: 'update_focus', args: { focus: '' } }] },
+    ];
+    await writeFile(transcriptFile, (await readFile(transcriptFile, 'utf8')) + appendRows.map(l => JSON.stringify(l)).join('\n') + '\n');
+    const clearedSnap = await skipMonitor.snapshot(SKIP_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now - 200, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(clearedSnap.hasNativeStepPlan, false, 'Empty update_steps array must clear stale nativeSteps');
+    assert.ok(!String(clearedSnap.headline || '').includes('临时焦点'), 'Empty update_focus must clear stale focus');
+
+    const dupNoTsRows = [
+      { step_index: 8, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(t0 + 1300).toISOString(), tool_calls: [{ name: 'update_steps', args: { steps: JSON.stringify(officialSteps) } }, { name: 'update_focus', args: { focus: '待清空焦点' } }] },
+      { step_index: 4, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: '<USER_REQUEST>\n同索引但无时间戳的新轮\n</USER_REQUEST>' },
+    ];
+    await writeFile(transcriptFile, (await readFile(transcriptFile, 'utf8')) + dupNoTsRows.map(l => JSON.stringify(l)).join('\n') + '\n');
+    const noTsResetSnap = await skipMonitor.snapshot(SKIP_ID, {
+      hostGenerating: true,
+      cascadeState: { selfStatus: 'CASCADE_RUN_STATUS_RUNNING', selfRunning: true, selfSettled: false, selfHasActiveChildren: false, selfModifiedMs: now, totalSubagents: 0, runningSubagents: 0, runningSubagentIds: [] },
+    });
+    assert.equal(noTsResetSnap.hasNativeStepPlan, false, 'Duplicate step_index with missing created_at must not be treated as exact duplicate');
+    assert.ok(!String(noTsResetSnap.headline || '').includes('待清空焦点'));
   } finally {
     await rm(brainRoot, { recursive: true, force: true });
   }

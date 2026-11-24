@@ -1,13 +1,13 @@
-# Antigravity Pulse (Claude-Style Inline Step Card & Quota Monitor)
+# Antigravity Pulse (Quota Monitor, Anti-Stall & Host UI Localization)
 
-适用于 **Google Antigravity**（macOS / Windows / Linux）的全功能增强状态栏、配额监控与对话流进度监控插件，基于 MIT 协议开源。
+适用于 **Google Antigravity**（macOS / Windows / Linux，已实机适配 `2.34.0+` 官方原生 `update_steps` 卡片）的全功能增强状态栏、配额监控、防卡死监控与原生界面汉化插件，基于 MIT 协议开源。
 
 ## 核心特性
 
-1. **对话气泡内嵌 Claude 风格步骤面板卡片**
-   - 在多步任务回复气泡内（工具调用折叠栏下方、最终总结上方）自动挂载实时步骤卡片。
-   - 支持**旋转圆弧**（进行中）、**虚线圆**（等待中）、**绿勾**（已完成）三种状态动画，**严格只读锁定、100% 由 AI 实时运行驱动**（禁止手动篡改状态）。
-   - 自动将底层工具调用与终端命令转化为**简明中文目的描述**（合并连续文件读取、剔除冗余 `命令:` 前缀与转义引号），并内置 [`rules/AGENTS.md`](rules/AGENTS.md) 规范引导三段式节奏。
+1. **原生联动官方 `update_steps` 步骤卡片（自动避让防重影）**
+   - 直接从 `transcript.jsonl` 解析 Antigravity `2.34.0+` 原生 `update_steps` 与 `update_focus`，同步驱动底部进度百分比胶囊、实时状态提示与卡死监控，并自动过滤 `update_steps`/`update_focus` 元工具噪音。
+   - 当回复气泡内已渲染官方 `[data-testid="step-plan"]` / `[data-testid="step-plan-chip"]` 卡片时，自动隐藏插件自绘卡片杜绝双卡重影；仅在发生卡死预警时弹出精简 `⚡ 重新调起` 唤醒横幅，或在旧版宿主 / 未调用 `update_steps` 的多步工具流中按需兜底渲染。
+   - 内置 [`rules/AGENTS.md`](rules/AGENTS.md) 引导优先使用原生 `update_steps` 与简明中文工具摘要（无需再额外写入 `task_steps.json`）。
 2. **Token 吞吐率、缓存命中率与配额监控**
    - 在输入框模型选择栏旁实时显示**生成速率（`tok/s`）**、**缓存命中率**、**上下文窗口占用**，以及 **5 小时 / 周配额详情**与本机 Token 用量热力图，支持**简/繁中文与英文一键切换**。
 3. **右下角紧凑进度胶囊与防卡死一键唤醒**
